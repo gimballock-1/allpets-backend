@@ -1,0 +1,125 @@
+# allpets NetworkPolicies — backend + database namespaces (issue 2.6)
+#
+# CNI enforcement: CONFIRMED on. k3s runs with defaults (flannel + the embedded
+# kube-router NetworkPolicy controller; no --disable-network-policy), so these
+# policies are enforced, not decorative.
+#
+# Posture: default-deny INGRESS per namespace, then explicit allows. Egress is
+# left OPEN on purpose (req §8.4 note in spec 2.6) so SMTP / Google APIs /
+# Backblaze B2 / GHCR / CoreDNS keep working — we don't want a too-tight egress
+# policy to break backups, OAuth, or email.
+#
+# LABEL CONTRACT (app epics MUST comply for these allows to take effect):
+#   - every allpets workload pod carries `app.kubernetes.io/part-of: allpets`
+#   - namespaces are selected by their built-in `kubernetes.io/metadata.name`
+#   The cross-namespace allows below are namespace-scoped (not per-pod), which is
+#   the right granularity until the app ports settle (5.13/6.3/11.x).
+#
+# REUSE NOTE: observability is the existing shared `observability` namespace
+# (Prometheus/Alloy). It must be allowed to scrape allpets pods' /metrics, hence
+# the allow-observability-scrape policy in every allpets namespace.
+
+####################  allpets-backend  ####################
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: allpets-backend
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Existing shared Prometheus/Alloy (observability ns) may scrape allpets pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-scrape
+  namespace: allpets-backend
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+---
+# Next.js (allpets-frontend) -> Payload / Cal.com / Plausible app (SSR + POST).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-frontend
+  namespace: allpets-backend
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: allpets-frontend
+---
+# Traefik (kube-system) -> backend services that ingress directly:
+# book.allpets -> Cal.com (3000), analytics.allpets -> Plausible (8000).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-ingress
+  namespace: allpets-backend
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: TCP, port: 3000 }
+        - { protocol: TCP, port: 8000 }
+
+####################  allpets-database  ####################
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: allpets-database
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-scrape
+  namespace: allpets-database
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+---
+# Payload / Cal.com / Plausible (allpets-backend) -> Postgres 5432,
+# MinIO 9000, ClickHouse 8123/9000. Only the backend namespace may reach data.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-backend
+  namespace: allpets-database
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: allpets-backend
+      ports:
+        - { protocol: TCP, port: 5432 }  # Postgres
+        - { protocol: TCP, port: 9000 }  # MinIO / ClickHouse native
+        - { protocol: TCP, port: 8123 }  # ClickHouse HTTP
