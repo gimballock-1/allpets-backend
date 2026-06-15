@@ -1,0 +1,115 @@
+# allpets Postgres Deployment (issue 4.2)
+#
+# PLAIN Kubernetes Deployment + PVC + Service (owner decision 2026-06-15 — NOT
+# CloudNativePG). Mirrors the aarogya postgres:16 shape that's already familiar on
+# this box (image, init SQL via a ConfigMap at /docker-entrypoint-initdb.d, creds
+# in a k8s Secret consumed via envFrom, Service on 5432) but FIXES aarogya's
+# anti-patterns (aarogya is a dev box; allpets is the live clinic site):
+#   - real local-path PVC (postgres-pvc.yaml), NOT an emptyDir.
+#   - ClusterIP Service (postgres-service.yaml), NOT a NodePort.
+#   - explicit resource requests/limits within the 2.12 database budget.
+#
+# strategy: Recreate — the data PVC is ReadWriteOnce, so two pods must NEVER mount
+# it at once. Recreate tears the old pod down before the new one starts (a brief
+# downtime window, acceptable for a single-instance phase-1 DB; no HA in scope).
+#
+# image: pinned to the specific minor postgres:16.4 (14.8). TODO(14.8): add the
+# resolved digest for a fully-immutable pin —
+#   docker buildx imagetools inspect postgres:16.4 --format '{{.Manifest.Digest}}'
+# then use image: postgres:16.4@sha256:<resolved> here AND in postgres-init-job.yaml
+# (keep tag+digest in sync). Tag-only is deployable now; a WRONG digest would
+# ImagePullBackOff, so we ship the tag rather than a fabricated digest.
+#
+# PGDATA is a SUBDIRECTORY of the mount (/var/lib/postgresql/data/pgdata) while the
+# PVC mounts at the parent (/var/lib/postgresql/data). local-path provisions an ext4
+# dir whose root may contain lost+found; initdb refuses a non-empty dir, so pgdata
+# must be a clean subdir.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: allpets
+        allpets.kinvee.in/tier: database
+    spec:
+      securityContext:
+        # postgres image runs as uid 999; fsGroup lets it own the local-path volume.
+        fsGroup: 999
+      containers:
+        - name: postgres
+          # postgres:16.4 — specific minor (14.8). TODO: pin by digest (see header).
+          image: postgres:16.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            # Bootstrap superuser + db AND the app-role passwords the initdb .sh
+            # reads. Real Secret created out-of-band; postgres-secret.example.yaml
+            # is the committed template (14.6 owns materialization later).
+            - secretRef:
+                name: postgres-secret
+          env:
+            # pgdata as a subdir of the mount — avoids the lost+found init failure.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          readinessProbe:
+            exec:
+              # Gate readiness on TCP (-h 127.0.0.1) so the Service only routes
+              # once the real postmaster accepts network conns. Correctly
+              # not-ready during first-boot initdb (TCP not up yet).
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              # Liveness probes the LOCAL UNIX socket (-h /var/run/postgresql),
+              # which tracks the postmaster the entrypoint starts DURING initdb.
+              # This prevents liveness from killing the pod mid-initialization if
+              # first-boot ever runs long (TCP/127.0.0.1 isn't up until init ends).
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h /var/run/postgresql"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            # Within the 2.12 database budget (req 2cpu/8Gi, lim 6cpu/12Gi;
+            # LimitRange per-container max 4cpu/8Gi).
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+            # the entrypoint must be able to exec the script (octal 0755 = 493).
+            defaultMode: 0755

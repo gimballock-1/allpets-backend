@@ -1,0 +1,41 @@
+# allpets — allow intra-namespace ingress to MinIO on 9000 (supports 4.7/4.8)
+#
+# WHY THIS EXISTS (companion to allow-intra-namespace-postgres.yaml):
+#   networkpolicies/backend-database.yaml installs a default-deny-ingress on the
+#   allpets-database namespace and only allows ingress to MinIO from the
+#   `allpets-backend` namespace (9000) and from `observability` (scrape). It does
+#   NOT allow SAME-NAMESPACE ingress, and k3s (kube-router) enforces this.
+#
+#   The 4.7/4.8 minio-setup Job (bucket + scoped key + ILM) runs INSIDE
+#   allpets-database and connects to the `minio` Service on 9000. Without this
+#   policy that intra-namespace ingress is DENIED, so the Job's `mc alias` retry
+#   loop spins until it gives up. This adds the missing same-namespace allow.
+#
+# SCOPE (tight): applies ONLY to the MinIO pod (podSelector
+# app.kubernetes.io/name: minio), allows ingress ONLY on 9000, and ONLY from
+# pods in this same namespace. It does not touch the console (9001), Postgres, or
+# any cross-namespace path. NetworkPolicies are additive, so this only ADDS the
+# in-namespace -> minio:9000 path; the committed 2.6 allows are unchanged.
+#
+# DEPENDENCY: relies on the 4.6 MinIO pod carrying app.kubernetes.io/name: minio.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-minio
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: allpets-database
+      ports:
+        - { protocol: TCP, port: 9000 }

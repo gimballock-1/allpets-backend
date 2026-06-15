@@ -1,0 +1,220 @@
+# allpets nightly Postgres backup — pg_dump CronJob (issue 4.5)
+#
+# PRIMARY AND ONLY backup (no off-site — Backblaze dropped, owner decision
+# 2026-06-15). Every night at 03:00 (cluster TZ) this dumps BOTH application
+# databases in pg_dump custom format to the local pgdump-pvc, names each file
+# with the DB + UTC timestamp, then prunes archives older than 14 days in the
+# same run. Custom format (-Fc) is compressed and restorable selectively with
+# `pg_restore -d <db> <file>.dump`.
+#
+# Auth model: connects PER-DB as the read-capable application roles
+# (payload_app -> payload, calcom_app -> calcom) created in 4.3. The app roles
+# own their DB so they can read everything in it — sufficient for a logical dump,
+# and avoids handing the backup job the superuser. Passwords come from the
+# existing `postgres-secret` (the 4.2/4.3 bootstrap Secret) via env — NO plaintext
+# creds in this manifest. That Secret is a TEMPLATE in-repo (*.example.yaml);
+# the real one is created out-of-band on the cluster (14.6 owns materialization).
+#
+# Networking (IMPORTANT): this Job runs INSIDE allpets-database and must reach
+# the in-namespace `postgres` Service on 5432. The namespace has
+# default-deny-ingress (2.6), which DOES block intra-namespace ingress once a pod
+# is selected — so a dedicated policy is required. See
+# networkpolicies/allow-intra-namespace-postgres.yaml (shipped with this bundle).
+# Without that policy this backup cannot connect.
+#
+# Image (14.8): pinned to postgres:16.4 so the pg_dump client major matches the
+# postgres:16 server. PIN BY DIGEST before prod apply (see applyNotes) —
+# postgres:16.4@sha256:<digest>.
+#
+# Storage ownership: local-path is hostPath-backed and provisions a root-owned
+# dir; fsGroup relabeling is not guaranteed on hostPath-style volumes. A root
+# initContainer chowns /backups to 999:999 before the unprivileged dump
+# container (uid/gid 999) runs, so writes never fail on a fresh PVC.
+#
+# Resources (2.12 budget): req 100m/256Mi, lim 500m/1Gi — within the
+# allpets-database quota (req 2cpu/8Gi, lim 6cpu/12Gi) and the LimitRange max
+# (4cpu/8Gi), even alongside Postgres + MinIO.
+#
+# Restore (runbook 4.9): copy a *.dump off the pgdump-pvc and run
+#   pg_restore --clean --if-exists -d <db> <db>-<stamp>.dump
+# against the target database as its owning role.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pgdump-nightly
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: pgdump
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  # 03:00 cluster time. Confirm no co-tenant nightly job (aarogya/local-ai-proxy)
+  # contends at this hour on quasar; shift a slot if so (see applyNotes/runbook).
+  schedule: "0 3 * * *"
+  # Never let a slow/overrunning dump overlap the next night's run.
+  concurrencyPolicy: Forbid
+  # If the cluster was down at 03:00, don't fire a stampede of missed runs.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pgdump
+        app.kubernetes.io/component: backup
+        app.kubernetes.io/part-of: allpets
+        allpets.kinvee.in/tier: database
+    spec:
+      # One automatic retry on transient failure, then give up (alert via the
+      # failedJobs history / dashboards). Avoids hammering a wedged DB.
+      backoffLimit: 1
+      # Reap finished backup Jobs after a day so history doesn't accumulate pods.
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/component: backup
+            app.kubernetes.io/part-of: allpets
+            allpets.kinvee.in/tier: database
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            # The dump container runs as the postgres image's `postgres` user
+            # (uid/gid 999). fsGroup is a best-effort relabel of the mount;
+            # the fix-perms initContainer below is the reliable guarantee on
+            # hostPath-backed local-path.
+            fsGroup: 999
+          initContainers:
+            # local-path provisions /backups as a root-owned host dir. Chown it
+            # to 999:999 once so the non-root dump container can write. Runs as
+            # root but drops every capability except CHOWN.
+            - name: fix-perms
+              image: postgres:16.4
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  # Make /backups owned by and private to the dump user (uid/gid
+                  # 999). local-path may hand us a dir ALREADY owned by 999 from a
+                  # prior run, so the chmod needs CAP_FOWNER (we add CHOWN+FOWNER)
+                  # to succeed regardless of the current owner. Both ops idempotent.
+                  chown 999:999 /backups
+                  chmod 0750 /backups
+              securityContext:
+                runAsNonRoot: false
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+                  add: ["CHOWN", "FOWNER"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          containers:
+            - name: pgdump
+              image: postgres:16.4
+              imagePullPolicy: IfNotPresent
+              env:
+                # In-cluster Postgres endpoint (4.2 Service).
+                - name: PGHOST
+                  value: postgres.allpets-database.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                # Writable scratch for pg_dump/libpq/bash (readOnlyRootFilesystem
+                # is on; /tmp below is an emptyDir).
+                - name: TMPDIR
+                  value: /tmp
+                - name: PGTMPDIR
+                  value: /tmp
+                # Read-capable application roles (4.3) — NOT the superuser.
+                # Passwords sourced from the existing bootstrap Secret; no
+                # plaintext in-repo. Keep these keys stable across 4.2/4.3/4.5.
+                - name: PAYLOAD_APP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: PAYLOAD_APP_PASSWORD
+                - name: CALCOM_APP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: CALCOM_APP_PASSWORD
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 999
+                runAsGroup: 999
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  BACKUP_DIR=/backups
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  RETENTION_DAYS=14
+
+                  # db_name : owning_role : password
+                  dump_one() {
+                    local db="$1" role="$2" pass="$3"
+                    local out="${BACKUP_DIR}/${db}-${STAMP}.dump"
+                    local tmp="${out}.partial"
+                    echo "[$(date -u +%FT%TZ)] dumping db=${db} as role=${role} -> ${out}"
+                    # Write to a .partial then atomically rename, so a crashed
+                    # dump never looks like a complete backup to the pruner/restore.
+                    PGPASSWORD="${pass}" pg_dump \
+                      --host="${PGHOST}" --port="${PGPORT}" \
+                      --username="${role}" --dbname="${db}" \
+                      --format=custom --compress=6 --no-owner --no-privileges \
+                      --file="${tmp}"
+                    mv "${tmp}" "${out}"
+                    echo "[$(date -u +%FT%TZ)] wrote ${out} ($(du -h "${out}" | cut -f1))"
+                  }
+
+                  dump_one payload payload_app "${PAYLOAD_APP_PASSWORD}"
+                  dump_one calcom  calcom_app  "${CALCOM_APP_PASSWORD}"
+
+                  # Clean up any orphaned partials from a previously killed run.
+                  find "${BACKUP_DIR}" -maxdepth 1 -type f -name '*.dump.partial' -mmin +60 -delete || true
+
+                  # Rotation: prune completed dumps older than RETENTION_DAYS.
+                  echo "[$(date -u +%FT%TZ)] pruning *.dump older than ${RETENTION_DAYS} days"
+                  find "${BACKUP_DIR}" -maxdepth 1 -type f -name '*.dump' -mtime +${RETENTION_DAYS} -print -delete
+
+                  echo "[$(date -u +%FT%TZ)] current backups:"
+                  ls -lh "${BACKUP_DIR}"/*.dump 2>/dev/null || echo "  (none)"
+                  echo "[$(date -u +%FT%TZ)] backup run complete"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 1Gi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: pgdump-pvc
+            # Writable scratch so pg_dump/libpq/bash work with a read-only root fs.
+            - name: tmp
+              emptyDir: {}

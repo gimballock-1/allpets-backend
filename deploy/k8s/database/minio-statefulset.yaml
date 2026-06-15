@@ -1,0 +1,123 @@
+# allpets MinIO — standalone object storage for Payload media (issue 4.6)
+#
+# WHY StatefulSet (not Deployment): MinIO is stateful and binds one pod to one
+# persistent /data volume. Recreate-on-an-RWO would also work, but a StatefulSet
+# gives a stable pod identity + an ordered, owned volumeClaimTemplate, which is
+# the upstream-recommended shape for single-node MinIO.
+#
+# MODE: standalone (1 replica, single drive). MinIO distributed/erasure-coded
+# mode needs >=4 drives; that is a phase-2 concern. Single-node k3s on quasar
+# only has local-path anyway, so there is no HA to gain here today.
+#
+# STORAGE: local-path (the cluster's only StorageClass; WaitForFirstConsumer,
+# node-pinned). RWO 10Gi at /data. local-path has no volume expansion — resize
+# means a new PVC + migrate (phase-2 caveat, shared with Postgres 4.2).
+#
+# NETWORK: ClusterIP only (see minio-service.yaml). The S3 API (9000) is the
+# only port the existing 2.6 NetworkPolicy allows from allpets-backend. The
+# console (9001) is NOT exposed publicly — tailnet/port-forward only (3.6 admin
+# posture).
+#
+# BUCKET PRIVACY (record for 5.10 / 7.7): the allpets-media bucket is PRIVATE.
+# Payload serves/proxies media through the app; we do NOT enable anonymous
+# download on the bucket. The setup Job (4.7) does not set a public policy.
+#
+# IMAGE PINNING (14.8): pinned to a specific MinIO RELEASE tag. Bump
+# deliberately; do not float :latest. Digest pinning preferred for production.
+#
+# RESOURCES (2.12 budget): req 250m/512Mi, lim 1cpu/2Gi — within the
+# allpets-database quota (req 2cpu/8Gi, lim 6cpu/12Gi) alongside Postgres and
+# the pg_dump CronJob.
+#
+# SECURITY CONTEXT / FALLBACK: runs as non-root UID/GID 1000 with fsGroup 1000
+# so the fresh local-path PVC is group-owned and writable. MinIO writes only
+# under /data, so arbitrary UID + fsGroup is generally fine. If this pinned
+# RELEASE will not start as UID 1000 on an empty volume (CrashLoop on /data or
+# .minio.sys permissions), DROP runAsUser/runAsGroup (let the image's own user
+# run) but KEEP fsGroup:1000. Smoke-test on first rollout (see applyNotes).
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: object-storage
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  serviceName: minio          # binds to the ClusterIP Service for stable DNS
+  replicas: 1                 # standalone — see header (distributed needs >=4)
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: object-storage
+        app.kubernetes.io/part-of: allpets   # required by 2.6 NetworkPolicy label contract
+        allpets.kinvee.in/tier: database
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000           # let the non-root user own the local-path volume
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          envFrom:
+            - secretRef:
+                name: minio-root-secret   # MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: minio
+          app.kubernetes.io/part-of: allpets
+          allpets.kinvee.in/tier: database
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 10Gi

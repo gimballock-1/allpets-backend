@@ -1,0 +1,54 @@
+# allpets — allow intra-namespace ingress to Postgres on 5432 (supports 4.3 + 4.5)
+#
+# WHY THIS EXISTS (blocker fix):
+#   networkpolicies/backend-database.yaml installs a `default-deny-ingress`
+#   policy on the allpets-database namespace (podSelector: {}, policyTypes:
+#   [Ingress]) plus only two allows: from the `observability` ns (scrape) and
+#   from the `allpets-backend` ns (5432/9000/8123). Standard NetworkPolicy
+#   semantics do NOT exempt same-namespace traffic once a pod is selected by an
+#   Ingress policy, and k3s enforces this (kube-router controller is on).
+#
+#   But two in-namespace clients need Postgres on 5432:
+#     - the 4.5 nightly pg_dump CronJob (this is the PRIMARY/ONLY backup), and
+#     - the 4.3 one-shot roles/init Job.
+#   Both run inside allpets-database, so the default-deny-ingress would DROP
+#   their connections to the postgres pod and the backup (and role init) would
+#   fail. This policy adds the missing intra-namespace allow.
+#
+# NOTE ON THE 2.6 'no new NetworkPolicy needed' statement: that was correct only
+# for the cross-namespace allpets-backend -> allpets-database path. It overlooked
+# these in-namespace Jobs. This is the one additional policy required for 4.3/4.5
+# to function (surfaced to the orchestrator in applyNotes/openQuestions).
+#
+# SCOPE: tightly scoped — ingress is permitted ONLY to the Postgres pod
+# (podSelector app.kubernetes.io/name: postgres, the label 4.2 sets) and ONLY on
+# TCP 5432, and ONLY from pods in this same namespace. It does not loosen access
+# to MinIO or anything else. Egress remains open per the 2.6 posture.
+#
+# DEPENDENCY: relies on the 4.2 Postgres pod carrying the label
+# `app.kubernetes.io/name: postgres`. Keep that label stable.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-postgres
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  # Apply this allow only to the Postgres server pod.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Any pod in the allpets-database namespace (the backup CronJob, the
+        # 4.3 init/roles Job). Namespace is matched by its built-in label so
+        # this stays correct even if pods are unlabeled.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: allpets-database
+      ports:
+        - { protocol: TCP, port: 5432 }

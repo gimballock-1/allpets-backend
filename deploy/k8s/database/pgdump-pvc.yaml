@@ -1,0 +1,37 @@
+# allpets Postgres backup volume — nightly pg_dump target (issue 4.5)
+#
+# PRIMARY AND ONLY backup. There is NO off-site copy: Backblaze B2 (old 4.4/1.9)
+# was DROPPED by owner decision (2026-06-15). The whole backup story for allpets
+# is the nightly pg_dump CronJob (pgdump-cronjob.yaml) writing custom-format dumps
+# of the `payload` and `calcom` databases here, with 14-day rotation.
+#
+# Owner-accepted trade-offs (documented so future-me isn't surprised):
+#   - SAME-BOX backups. local-path is node-pinned to quasar; if that disk dies,
+#     the live DB volume AND this backup volume die together. No redundancy today.
+#   - NO PITR. Nightly logical dumps only; up to ~24h of writes can be lost.
+#   - Phase-2 migration maps /backups onto a NAS / off-node store; until then this
+#     local PVC is all we have. (Epic 15 hardening tracks DR portability.)
+#
+# StorageClass: the cluster's ONLY class is `local-path` (default, provisioner
+# rancher.io/local-path, WaitForFirstConsumer, no expansion). We name it
+# explicitly rather than rely on the default so the manifest is self-describing.
+# WaitForFirstConsumer => this PVC stays Pending until the first CronJob pod is
+# scheduled; that's expected, not an error.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pgdump-pvc
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: pgdump
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

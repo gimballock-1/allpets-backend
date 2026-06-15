@@ -1,0 +1,30 @@
+# allpets Postgres Service (issue 4.2)
+#
+# DELIBERATE FIX over the aarogya mirror reference: aarogya exposes Postgres as a
+# NodePort (reachable off-box). allpets is the live clinic site, so Postgres is
+# ClusterIP — INTERNAL ONLY. The already-committed NetworkPolicy 2.6
+# (networkpolicies/backend-database.yaml, allow-from-backend) restricts ingress to
+# the allpets-backend namespace on 5432; keeping the port at 5432 makes that allow
+# match with NO new policy for the backend->db flow. (The intra-namespace init
+# Job->db flow needs its own scoped policy — see postgres-init-networkpolicy.yaml.)
+#
+# In-cluster DSN the apps use (5.10 Payload, 6.x Cal.com):
+#   postgres.allpets-database.svc.cluster.local:5432
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      protocol: TCP
+      port: 5432
+      targetPort: 5432

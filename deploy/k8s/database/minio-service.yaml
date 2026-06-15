@@ -1,0 +1,41 @@
+# allpets MinIO Service — ClusterIP (issue 4.6)
+#
+# ClusterIP (internal only). The 2.6 NetworkPolicy already allows
+# allpets-backend -> allpets-database on 9000, so keep the S3 API on 9000 for
+# that allow to match. NO Ingress, NO NodePort, NO LoadBalancer.
+#
+# Ports:
+#   9000 (s3)      S3 API. In-cluster endpoint for Payload (5.10):
+#                  http://minio.allpets-database.svc.cluster.local:9000
+#                  (forcePathStyle: true on the Payload side).
+#   9001 (console) MinIO web console — NOT exposed publicly (3.6 admin posture).
+#                  Reach it via tailnet / `kubectl port-forward svc/minio 9001`.
+#                  It rides on this ClusterIP only for in-cluster/port-forward
+#                  access; no Ingress points at it.
+#
+# This is also the StatefulSet's `serviceName`, giving the pod stable DNS
+# (minio-0.minio.allpets-database.svc.cluster.local) for completeness.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: object-storage
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: s3
+      protocol: TCP
+      port: 9000
+      targetPort: s3
+    - name: console
+      protocol: TCP
+      port: 9001
+      targetPort: console
