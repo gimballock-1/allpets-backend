@@ -340,12 +340,12 @@ online and complete the deferred 3.5 verification.
 ### 3.1 Topology (what runs in `allpets-database`)
 - **Postgres** — plain `Deployment` (1 replica, `strategy: Recreate` — RWO PVC,
   never two pods on one volume), pinned image `postgres:16.4` (digest preferred,
-  14.8). Data on a **`local-path` RWO PVC** (`postgres-pvc`, ~10–20Gi) mounted at
+  14.8). Data on a **`local-path` RWO PVC** (`postgres-data`, ~10–20Gi) mounted at
   `/var/lib/postgresql/data` with `PGDATA=…/pgdata` (subdir avoids the `lost+found`
-  init failure). The pod **also mounts `pgdump-pvc` read-only at `/backups`** as the
-  standing arrangement (§3.6), so restores (§3.8) can read dumps without an ad-hoc
-  remount. `ClusterIP` Service **`postgres:5432`**. In-cluster DSN host:
-  `postgres.allpets-database.svc.cluster.local:5432`.
+  init failure). The Postgres pod mounts **only** its data PVC + the initdb ConfigMap;
+  the backup PVC (`pgdump-pvc`) is **not** mounted here — read dumps via a short-lived
+  reader pod that mounts it (§3.6 / §3.8). `ClusterIP` Service **`postgres:5432`**.
+  In-cluster DSN host: `postgres.allpets-database.svc.cluster.local:5432`.
 - **MinIO** — standalone `StatefulSet` (1 replica; distributed needs ≥4 drives —
   phase 2), pinned `quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z`
   (**proposed pin — confirm/refresh the exact RELEASE date + digest on first
@@ -389,18 +389,19 @@ The orchestrator wires the **durable** manifests into `deploy/k8s/kustomization.
 NetworkPolicies in §3.4**). The **`*.example.yaml` templates** and the **one-shot
 Jobs** (`postgres-init`, `minio-setup`) are **not** in kustomize.
 
-> **⚠️ NET-NEW NetworkPolicies — MUST be added to kustomize (read §3.4 first).**
+> **⚠️ NET-NEW NetworkPolicies — already wired in; apply order matters (read §3.4).**
 > The 2.6 fact *"no new NetworkPolicy needed"* covered **only** the cross-namespace
 > `allpets-backend → allpets-database` flow. It does **not** cover the **in-namespace**
 > Job/CronJob → DB flows this epic introduces, which the committed
 > `default-deny-ingress` (podSelector `{}`) **drops**. Two new files —
 > **`deploy/k8s/networkpolicies/allow-intra-namespace-postgres.yaml`** and
-> **`deploy/k8s/networkpolicies/allow-setup-to-minio.yaml`** — **must be added to
-> `deploy/k8s/kustomization.yaml` `resources:` and applied BEFORE Postgres/MinIO and
-> the first Job/CronJob run.** If they are skipped, `postgres-init`, `minio-setup`,
-> and every `pgdump-nightly` run **hang on connect and fail silently** (timeout, not
-> error). This is the one place §3 knowingly deviates from an authoritative fact; the
-> deviation is correct (see §3.4).
+> **`deploy/k8s/networkpolicies/allow-intra-namespace-minio.yaml`** — are **already
+> listed in `deploy/k8s/kustomization.yaml` `resources:`** (next to
+> `backend-database.yaml`) and apply with the rest of the tree, **before**
+> Postgres/MinIO and the first Job/CronJob run. If they were ever removed,
+> `postgres-init`, `minio-setup`, and every `pgdump-nightly` run **hang on connect and
+> fail silently** (timeout, not error). This is the one place §3 knowingly deviates
+> from an authoritative fact; the deviation is correct (see §3.4).
 
 Order:
 
@@ -421,8 +422,8 @@ Order:
    exits non-zero on failure, so the wait is a trustworthy gate.
 7. **`pgdump-pvc` + `pgdump-nightly` CronJob** — after Postgres is ready, the §3.4
    policies are in place, **and** the roles exist (the CronJob authenticates as
-   `payload_app` / `calcom_app`). `pgdump-pvc` is also mounted read-only on the
-   Postgres pod (§3.1) so restores can read dumps directly.
+   `payload_app` / `calcom_app`). `pgdump-pvc` is consumed only by the CronJob's
+   pods; read dumps for a restore via a short-lived reader pod (§3.6 / §3.8).
 
 Job pod templates are immutable; to **re-run** any one-shot Job after an edit,
 `kubectl -n allpets-database delete job <name>` then re-apply.
@@ -441,14 +442,15 @@ they hang until timeout, then fail.
 This is a **deviation from the 2.6 "no new NetworkPolicy needed" fact**, which was
 true only for the cross-namespace backend→database flow; it did **not** anticipate
 these in-namespace Job→DB flows. Two tightly-scoped, **NET-NEW** policies under
-`deploy/k8s/networkpolicies/` close the gap (**durable — the orchestrator MUST add
-both to `deploy/k8s/kustomization.yaml`, see §3.3**):
+`deploy/k8s/networkpolicies/` close the gap (**durable — both are wired into
+`deploy/k8s/kustomization.yaml`, see §3.3**):
 - **`allow-intra-namespace-postgres.yaml`** — ingress to the Postgres pod
-  (`podSelector` `app.kubernetes.io/name: postgres`) on **TCP 5432** from
-  same-namespace pods. Unblocks the init Job **and** the nightly backup.
-- **`allow-setup-to-minio.yaml`** — ingress to the MinIO pod on **TCP 9000** from
-  the setup-Job pod (least-privilege `from` scoped to its
-  `app.kubernetes.io/component: setup` labels).
+  (`podSelector` `app.kubernetes.io/name: postgres`) on **TCP 5432** from any pod in
+  `allpets-database` (`namespaceSelector` `kubernetes.io/metadata.name:
+  allpets-database`). Unblocks the init Job **and** the nightly backup.
+- **`allow-intra-namespace-minio.yaml`** — ingress to the MinIO pod
+  (`podSelector` `app.kubernetes.io/name: minio`) on **TCP 9000** from any pod in
+  `allpets-database` (same `namespaceSelector`). Unblocks the `minio-setup` Job.
 
 Both must be applied **before** Postgres/MinIO and the first Job/backup run.
 The `verify-isolation` check (§3.5) uses `kubectl exec` over the **local socket**, so
@@ -491,14 +493,16 @@ kubectl -n allpets-database wait --for=condition=complete job/postgres-init --ti
 - **Confirm `0 3 * * *` is clear** of co-tenant nightly jobs (`aarogya`,
   `local-ai-proxy`) on quasar; if it contends, shift a slot (e.g. `0 4 * * *`) and
   record it here. Low risk given `Forbid` + the small ceiling (lim 500m/1Gi).
-- **Smoke-test on first deploy** (also exercises the §3.4 policy). The Postgres pod
-  mounts `pgdump-pvc` read-only at `/backups` (§3.1), so verify there:
+- **Smoke-test on first deploy** (also exercises the §3.4 policy). The dump files live
+  on `pgdump-pvc`, which the Postgres pod does **not** mount — inspect via a tiny
+  reader pod:
   ```bash
   kubectl -n allpets-database create job --from=cronjob/pgdump-nightly pgdump-manual-verify
   kubectl -n allpets-database wait --for=condition=complete job/pgdump-manual-verify --timeout=180s
-  kubectl -n allpets-database logs job/pgdump-manual-verify
+  kubectl -n allpets-database logs job/pgdump-manual-verify   # log lists both dump files + sizes
   # confirm both files exist AND are owned by the dump UID (expected 999:999):
-  kubectl -n allpets-database exec deploy/postgres -- ls -ln /backups
+  kubectl -n allpets-database run pgdump-ls --rm -i --restart=Never --image=busybox \
+    --overrides='{"spec":{"containers":[{"name":"r","image":"busybox","command":["ls","-ln","/backups"],"volumeMounts":[{"name":"b","mountPath":"/backups"}]}],"volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"pgdump-pvc"}}]}}'
   kubectl -n allpets-database delete job pgdump-manual-verify
   ```
 
@@ -533,14 +537,19 @@ step after the load. Copy-paste (example: restore `payload`):
 NS=allpets-database
 DB=payload                                  # or: calcom
 
-# 1. Pick the archive to restore. The postgres pod mounts pgdump-pvc read-only at
-#    /backups (see §3.1), so list and choose from there:
-kubectl -n "$NS" exec deploy/postgres -- sh -c 'ls -1t /backups/'"$DB"'-*.dump | head'
-DUMP=/backups/payload-2026-06-15.dump       # set to the chosen file
-#    --- If the postgres pod does NOT mount pgdump-pvc (older manifest), land the
-#        dump on the pod first instead of the line above:
-#        kubectl -n "$NS" cp ./payload-2026-06-15.dump postgres-<pod>:/tmp/restore.dump
-#        DUMP=/tmp/restore.dump
+# 1. Fetch the archive. The Postgres pod does NOT mount pgdump-pvc, so use a
+#    short-lived reader pod to list dumps and copy the chosen one into the Postgres
+#    pod's /tmp. Dump filenames are <db>-<UTC-stamp>.dump, e.g. payload-20260615T030000Z.dump:
+kubectl -n "$NS" run pgdump-reader --restart=Never --image=postgres:16.4 \
+  --overrides='{"spec":{"securityContext":{"fsGroup":999},"containers":[{"name":"r","image":"postgres:16.4","command":["sleep","1200"],"volumeMounts":[{"name":"b","mountPath":"/backups","readOnly":true}]}],"volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"pgdump-pvc"}}]}}'
+kubectl -n "$NS" wait --for=condition=ready pod/pgdump-reader --timeout=60s
+kubectl -n "$NS" exec pgdump-reader -- sh -c 'ls -1t /backups/'"$DB"'-*.dump | head'
+ARCHIVE=payload-20260615T030000Z.dump       # set to the chosen …Z.dump file
+PGPOD=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=postgres -o jsonpath='{.items[0].metadata.name}')
+kubectl -n "$NS" cp "pgdump-reader:/backups/$ARCHIVE" "/tmp/$ARCHIVE"
+kubectl -n "$NS" cp "/tmp/$ARCHIVE" "$PGPOD:/tmp/restore.dump"
+kubectl -n "$NS" delete pod pgdump-reader --wait=false
+DUMP=/tmp/restore.dump
 
 # 2. Stop the consuming app first (avoid writes during restore):
 #    Payload runs in allpets-backend (5.x); Cal.com in allpets-backend (6.x).
