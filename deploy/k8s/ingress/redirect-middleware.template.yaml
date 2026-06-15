@@ -1,0 +1,72 @@
+# allpets HTTP->HTTPS redirect Middleware — TEMPLATE (issue 3.4)
+#
+# Traefik Middleware that 308-redirects http:// -> https:// for allpets hosts.
+# This is the IMPROVEMENT over the live ai.kinvee.in reference (which serves
+# plaintext with no redirect). It is referenced from each host Ingress via:
+#   traefik.ingress.kubernetes.io/router.middlewares: <ns>-redirect-https@kubernetescrd
+#
+# WHY A REDIRECT IS SAFE HERE (do not "fix" this back to plaintext):
+#   TLS for the three allpets hosts is issued by cert-manager's DNS-01 solver
+#   (Route53 _acme-challenge TXT records — verified 2026-06-15). There is NO
+#   HTTP /.well-known/acme-challenge path involved, so an HTTP->HTTPS redirect
+#   CANNOT break ACME. Port 80 is not even required for issuance. See README.md.
+#
+# WHY PER-NAMESPACE (this is the load-bearing constraint):
+#   Traefik on this cluster runs with kubernetescrd but allowCrossNamespace is
+#   NOT set. A Middleware can therefore only be referenced by an Ingress in its
+#   OWN namespace. So this same object must be instantiated in EVERY allpets
+#   namespace that has a redirecting Ingress:
+#     - allpets-frontend  (for allpets.kinvee.in)  -> authored in the FRONTEND repo
+#     - allpets-backend   (for book + analytics)   -> authored in THIS repo
+#   The two backend hosts share one Middleware in allpets-backend; the frontend
+#   host needs its own copy in allpets-frontend (different repo).
+#
+# This is a NEW object type on the cluster: there are currently NO Traefik
+# Middleware objects anywhere (verified 2026-06-15). It is the kubernetescrd
+# CRD `middlewares.traefik.io` (k3s' bundled Traefik v2/v3 provides this CRD).
+#
+# FOLD-IN: ship this in the same kustomize tree as the host Ingress it serves,
+# and add it to kustomization.yaml AHEAD OF the Ingress (the Middleware must
+# exist before an Ingress references it, or Traefik logs a missing-middleware
+# error and serves the route without the redirect until reconciled).
+
+# --- allpets-backend copy (serves book + analytics; THIS repo, fold in with 6.3/11.1) ---
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: backend
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true   # emits 308 Permanent Redirect
+
+# --- allpets-frontend copy (serves allpets.kinvee.in) ---
+# AUTHORED IN THE allpets-frontend REPO, not here — the allpets-frontend namespace
+# is owned there. Reproduced as a comment so the pattern is unambiguous; copy it
+# verbatim into allpets-frontend/deploy/k8s/ alongside the site Ingress:
+#
+#   apiVersion: traefik.io/v1alpha1
+#   kind: Middleware
+#   metadata:
+#     name: redirect-https
+#     namespace: allpets-frontend
+#     labels:
+#       app.kubernetes.io/part-of: allpets
+#       allpets.kinvee.in/tier: frontend
+#   spec:
+#     redirectScheme:
+#       scheme: https
+#       permanent: true
+#
+# Annotation snippet to add to the referencing Ingress (note the @kubernetescrd
+# provider suffix and the <namespace>-<middlewarename> naming Traefik requires):
+#   metadata:
+#     annotations:
+#       traefik.ingress.kubernetes.io/router.middlewares: allpets-backend-redirect-https@kubernetescrd
+#   # ...and for the site Ingress in the frontend repo:
+#   #   traefik.ingress.kubernetes.io/router.middlewares: allpets-frontend-redirect-https@kubernetescrd
