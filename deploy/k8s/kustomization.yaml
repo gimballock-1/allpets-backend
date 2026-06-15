@@ -1,0 +1,17 @@
+# allpets-backend — single ordered apply path.
+#
+#   kubectl apply -k deploy/k8s        (from repo root)
+#
+# Aggregates every backend/shared cluster manifest so the stack can be brought
+# up reproducibly from the repo. Add new manifests to `resources` as epics land
+# (DBs/CNPG, MinIO, app Deployments, ingress, ResourceQuota/LimitRange, the
+# captured cert-manager ClusterIssuer, etc.).
+#
+# NOTE: full rebuild-from-repo (substrate capture, DR runbook, observability
+# portability) is deferred to the Epic 15 hardening pass — see issue #131.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespaces.yaml
+  - networkpolicies/backend-database.yaml
