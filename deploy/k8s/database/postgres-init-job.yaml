@@ -1,0 +1,167 @@
+# allpets Postgres roles/DBs init Job — idempotent re-apply (issue 4.3)
+#
+# The initdb ConfigMap (postgres-initdb-configmap.yaml) ONLY runs on the FIRST
+# boot of an empty data dir. This one-shot Job applies the SAME DB/role topology
+# to an ALREADY-running cluster (e.g. data dir already existed, or the roles need
+# re-asserting), and is SAFE TO RE-RUN: every statement is guarded so re-running
+# is a no-op.
+#
+# It connects over the network to the postgres Service as the superuser. The
+# namespace has default-deny-ingress (2.6), so the same-namespace allow in
+# networkpolicies/allow-intra-namespace-postgres.yaml is what permits this Job's
+# ingress to the postgres pod on 5432 — WITHOUT that policy the Job would hang.
+# Run it AFTER the Postgres Deployment is Ready. A Job is immutable once complete; to re-run, delete then
+# re-apply (see applyNotes). NOT wired into deploy/k8s/kustomization.yaml (one-shot,
+# ordered after Postgres is ready).
+#
+# Idempotency technique:
+#   - roles: DO $$ ... IF NOT EXISTS (pg_roles) ... CREATE ROLE; the password is
+#     ALWAYS re-applied via a separate ALTER ROLE so a rotated Secret takes effect.
+#   - databases: CREATE DATABASE has no IF NOT EXISTS, so we gate it with a
+#     \gexec over a SELECT that emits the CREATE only when the db is absent
+#     (CREATE DATABASE can't run inside a DO/transaction block).
+#   - grants/revokes and CREATE EXTENSION IF NOT EXISTS are naturally idempotent.
+# Passwords come from env (postgres-secret), never hardcoded.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-init
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: init
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        # component=init marks this one-shot init Job. Ingress to postgres:5432 is
+        # permitted by networkpolicies/allow-intra-namespace-postgres.yaml (any
+        # same-namespace client) — no specific label dependency.
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: init
+        app.kubernetes.io/part-of: allpets
+        allpets.kinvee.in/tier: database
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: psql
+          # Same specific minor as the server (14.8) so behaviour matches exactly.
+          # TODO(14.8): pin by digest in sync with postgres-deployment.yaml.
+          image: postgres:16.4
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: PGHOST
+              value: postgres.allpets-database.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            # writable HOME/TMP since readOnlyRootFilesystem is on (psql/libpq
+            # may touch $HOME); the script itself writes no files.
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              : "${PAYLOAD_APP_PASSWORD:?PAYLOAD_APP_PASSWORD must be set}"
+              : "${CALCOM_APP_PASSWORD:?CALCOM_APP_PASSWORD must be set}"
+
+              export PGPASSWORD="$POSTGRES_PASSWORD"
+              SUPER() { psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" "$@"; }
+
+              echo "[init] waiting for postgres to accept connections..."
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; do
+                sleep 2
+              done
+
+              echo "[init] ensuring roles (create-if-absent, always re-assert password)..."
+              SUPER -v payload_pw="$PAYLOAD_APP_PASSWORD" -v calcom_pw="$CALCOM_APP_PASSWORD" <<-'SQL'
+                -- create-if-absent WITHOUT a DO/$$ block: the $$ dollar-quote tag
+                -- does not survive this YAML-embedded heredoc (psql received a
+                -- mangled "DO $"). \gexec is robust — it executes the CREATE only
+                -- when the guard SELECT returns a row (i.e. the role is missing).
+                SELECT 'CREATE ROLE payload_app LOGIN'
+                 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'payload_app')\gexec
+                SELECT 'CREATE ROLE calcom_app LOGIN'
+                 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'calcom_app')\gexec
+                -- re-assert LOGIN + password every run so a rotated Secret applies.
+                ALTER ROLE payload_app WITH LOGIN PASSWORD :'payload_pw';
+                ALTER ROLE calcom_app  WITH LOGIN PASSWORD :'calcom_pw';
+              SQL
+
+              echo "[init] ensuring databases (create-if-absent via \gexec)..."
+              # CREATE DATABASE can't run in a transaction/DO block; \gexec emits it
+              # only when missing. OWNER is set on create; re-asserted below.
+              SUPER <<-'SQL'
+                SELECT 'CREATE DATABASE payload OWNER payload_app'
+                 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'payload')\gexec
+                SELECT 'CREATE DATABASE calcom OWNER calcom_app'
+                 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'calcom')\gexec
+              SQL
+
+              echo "[init] re-asserting ownership + scoped, isolated grants..."
+              SUPER <<-'SQL'
+                ALTER DATABASE payload OWNER TO payload_app;
+                ALTER DATABASE calcom  OWNER TO calcom_app;
+
+                -- only the owning role may connect to each db.
+                REVOKE CONNECT ON DATABASE payload FROM PUBLIC;
+                REVOKE CONNECT ON DATABASE calcom  FROM PUBLIC;
+                REVOKE CONNECT ON DATABASE calcom  FROM payload_app;  -- isolation
+                REVOKE CONNECT ON DATABASE payload FROM calcom_app;   -- isolation
+                GRANT  CONNECT ON DATABASE payload TO payload_app;
+                GRANT  CONNECT ON DATABASE calcom  TO calcom_app;
+              SQL
+
+              # public-schema ownership inside each db -> full DDL for the app role
+              # (Postgres 15+ no longer grants CREATE on public to PUBLIC), PLUS the
+              # commonly-needed trusted extensions pre-created as superuser so app
+              # migrations (5.10/6.x) don't fail on CREATE EXTENSION.
+              echo "[init] ensuring public-schema ownership + extensions per db..."
+              # NB: use psql -c flags, NOT a heredoc. An indented heredoc inside
+              # this for-loop has a space-indented terminator, and <<- only strips
+              # TABS — so the YAML-embedded heredoc runs to EOF ("unexpected end of
+              # file"). -c flags sidestep the terminator problem entirely.
+              for pair in "payload:payload_app" "calcom:calcom_app"; do
+                db="${pair%%:*}"; owner="${pair##*:}"
+                psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" \
+                  -c "ALTER SCHEMA public OWNER TO ${owner};" \
+                  -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" \
+                  -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" \
+                  -c "CREATE EXTENSION IF NOT EXISTS citext;" \
+                  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+              done
+
+              echo "[init] done. payload/calcom DBs + roles + extensions ensured with isolation."
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

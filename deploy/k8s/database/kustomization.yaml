@@ -1,0 +1,25 @@
+# allpets-database — durable stateful substrate (Epic 4).
+#
+# Included here = the declarative, reconcilable resources (applied by
+# `kubectl apply -k deploy/k8s`). Deliberately EXCLUDED:
+#   - *-secret.example.yaml  : TEMPLATES with REPLACE_ME values; the real Secrets
+#                              are created out-of-band (14.6 owns this later).
+#   - postgres-init-job.yaml : one-shot, ordered AFTER Postgres is Ready.
+#   - minio-setup-job.yaml   : one-shot, ordered AFTER MinIO is Ready.
+# The intra-namespace NetworkPolicies live under ../networkpolicies/ and are
+# listed in the parent kustomization next to backend-database.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Postgres (4.2/4.3)
+  - postgres-pvc.yaml
+  - postgres-initdb-configmap.yaml
+  - postgres-service.yaml
+  - postgres-deployment.yaml
+  # MinIO (4.6)
+  - minio-service.yaml
+  - minio-statefulset.yaml
+  # Backup (4.5)
+  - pgdump-pvc.yaml
+  - pgdump-cronjob.yaml

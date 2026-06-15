@@ -1,0 +1,212 @@
+# allpets MinIO setup — bucket + scoped key + lifecycle (issues 4.7 & 4.8)
+#
+# One-shot, idempotent Job. Run AFTER the MinIO StatefulSet is Ready. Safe to
+# re-run: every mc step is idempotent (--ignore-existing on the bucket, policy
+# create is preceded by a remove so the body is always current, user add
+# re-applies the same creds, the ILM tmp/ rule is reconciled by prefix). On
+# re-apply, delete the old completed Job first
+# (`kubectl -n allpets-database delete job minio-setup`) since Job pod templates
+# are immutable; the orchestrator handles this in the apply order.
+#
+# 4.7 — does:
+#   1. mc alias to the ROOT creds (in-cluster, never leaves the pod).
+#   2. mc mb allpets-media (idempotent).
+#   3. create a SCOPED policy: s3:GetObject/PutObject/DeleteObject on the bucket
+#      objects + s3:ListBucket on the bucket itself — and NOTHING else.
+#   4. mc admin user add the PAYLOAD key (from minio-payload-key Secret).
+#   5. mc admin policy attach the scoped policy to that user.
+#   6. VERIFY the user/policy/attachment really exist (fails the Job otherwise).
+#   The payload user is SCOPED — it can never touch other buckets or admin APIs.
+#
+# 4.8 (P2) — adds an ILM expiry rule on prefix tmp/ at 30 days. The --prefix
+# guard means it only matches keys under tmp/ and NEVER normal media keys
+# (Payload writes media under its own collection prefixes, not tmp/). Only this
+# Job manages ILM on allpets-media; reconciliation removes only the tmp/ rule.
+#
+# BUCKET PRIVACY (record for 5.10 / 7.7): allpets-media stays PRIVATE. We do NOT
+# run `mc anonymous set download` — Payload serves/proxies media through the app.
+#
+# NETWORK NOTE (correctness blocker — see applyNotes/openQuestions): this Job
+# runs IN allpets-database and connects to minio:9000 (same namespace). The 2.6
+# default-deny-ingress in allpets-database denies same-namespace ingress to the
+# MinIO pod; allow-from-backend only permits the allpets-backend namespace. An
+# intra-namespace allow (scoped to this Job's labels) MUST be applied before
+# this Job, or it hangs on the alias loop and fails after ~60 tries.
+#
+# IMAGE PINNING (14.8): mc pinned to a specific RELEASE tag.
+#
+# RESOURCES (2.12 budget): req 50m/64Mi, lim 250m/256Mi — tiny, well within the
+# allpets-database quota.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-setup
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: setup
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  backoffLimit: 6            # retry while MinIO finishes coming up
+  ttlSecondsAfterFinished: 86400   # auto-clean the completed Job after a day
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: setup    # NetworkPolicy `from` selector targets this
+        app.kubernetes.io/part-of: allpets    # NetworkPolicy label contract
+        allpets.kinvee.in/tier: database
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2024-09-16T17-43-14Z
+          imagePullPolicy: IfNotPresent
+          env:
+            # Root creds — used ONLY to administer MinIO from inside this pod.
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root-secret
+                  key: MINIO_ROOT_PASSWORD
+            # Scoped key minted for Payload (NOT root).
+            - name: PAYLOAD_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-payload-key
+                  key: MINIO_PAYLOAD_ACCESS_KEY
+            - name: PAYLOAD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-payload-key
+                  key: MINIO_PAYLOAD_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              MINIO_URL="http://minio.allpets-database.svc.cluster.local:9000"
+              BUCKET="allpets-media"
+              POLICY="payload-media-rw"
+              POLICY_FILE="/tmp/${POLICY}.json"
+
+              # mc writes config under its config dir; the non-root user owns /tmp.
+              export MC_CONFIG_DIR=/tmp/.mc
+
+              echo ">> waiting for MinIO to be reachable..."
+              # alias set retries internally, but loop until it succeeds.
+              i=0
+              until mc alias set local "$MINIO_URL" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+                i=$((i+1))
+                if [ "$i" -ge 60 ]; then
+                  echo "!! MinIO not reachable after 60 tries — giving up" >&2
+                  exit 1
+                fi
+                echo "   ($i) MinIO not ready yet; retrying in 5s"
+                sleep 5
+              done
+              echo ">> mc alias 'local' configured"
+
+              echo ">> ensuring bucket $BUCKET exists (idempotent)"
+              mc mb --ignore-existing "local/${BUCKET}"
+
+              # Bucket stays PRIVATE — we deliberately do NOT run
+              # `mc anonymous set download local/${BUCKET}`. (5.10/7.7)
+
+              echo ">> writing scoped policy $POLICY to $POLICY_FILE"
+              # IMPORTANT: written with printf (NOT a heredoc). A heredoc
+              # terminator must sit at absolute column 0, which is impossible to
+              # guarantee inside this YAML block scalar — an indented EOF would
+              # be swallowed as content and silently break every later step.
+              # printf with single-quoted format + concatenated "$BUCKET"
+              # interpolates the bucket name without any quoting/indent hazard.
+              printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::'"$BUCKET"'/*"]},{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::'"$BUCKET"'"]}]}' > "$POLICY_FILE"
+              echo "   policy body:"
+              cat "$POLICY_FILE"; echo
+
+              echo ">> creating/updating policy $POLICY"
+              # `policy create` errors if it already exists; remove first so the
+              # body is always current, then create (must succeed -> not suppressed).
+              mc admin policy rm local "$POLICY" >/dev/null 2>&1 || true
+              mc admin policy create local "$POLICY" "$POLICY_FILE"
+
+              echo ">> ensuring payload user exists"
+              # `user add` is an upsert for the same access key; re-running keeps
+              # the secret in sync with the Secret object. Must succeed.
+              mc admin user add local "$PAYLOAD_ACCESS_KEY" "$PAYLOAD_SECRET_KEY"
+              mc admin user enable local "$PAYLOAD_ACCESS_KEY"
+
+              echo ">> attaching $POLICY to payload user"
+              # attach is the one genuinely-tolerant step: it errors harmlessly
+              # if the policy is already attached from a prior run. The hard
+              # verification below asserts the attachment regardless, so this
+              # tolerance can never mask a real failure.
+              mc admin policy attach local "$POLICY" --user "$PAYLOAD_ACCESS_KEY" 2>/dev/null \
+                || echo "   policy attach reported already-attached — will verify"
+
+              echo ">> ensuring tmp/ ILM expiry rule (30d) — 4.8"
+              # Idempotent AND grep/cut/jq-free (the minio/mc image ships none of
+              # them). This Job is the sole manager of ILM on this bucket, so just
+              # clear ALL rules then add the single tmp/ expiry rule — no JSON
+              # parsing, no rule-id extraction.
+              mc ilm rule remove --all --force "local/${BUCKET}" >/dev/null 2>&1 || true
+              mc ilm rule add --expire-days 30 --prefix "tmp/" "local/${BUCKET}"
+
+              echo ">> VERIFYING setup (these MUST succeed or the Job fails) ..."
+              # grep/cut are NOT in the minio/mc image — verify with POSIX shell
+              # `case` pattern matches on captured output instead of piping to grep.
+              # 1. The scoped user exists.
+              mc admin user info local "$PAYLOAD_ACCESS_KEY"
+              # 2. The scoped policy exists.
+              mc admin policy info local "$POLICY" >/dev/null
+              # 3. The policy is actually attached to the payload user.
+              ENTITIES="$(mc admin policy entities local --user "$PAYLOAD_ACCESS_KEY" 2>/dev/null || true)"
+              case "$ENTITIES" in
+                *"$POLICY"*) echo "   policy $POLICY attached OK" ;;
+                *) echo "!! policy $POLICY is NOT attached to $PAYLOAD_ACCESS_KEY" >&2; exit 1 ;;
+              esac
+              # 4. The bucket exists.
+              mc ls "local/${BUCKET}" >/dev/null
+              # 5. An ILM rule on tmp/ is present.
+              ILM_LS="$(mc ilm rule ls "local/${BUCKET}" 2>/dev/null || true)"
+              case "$ILM_LS" in
+                *tmp/*) echo "   tmp/ ILM rule present OK" ;;
+                *) echo "!! tmp/ ILM rule missing after setup" >&2; exit 1 ;;
+              esac
+
+              echo ">> MinIO setup verified:"
+              mc ls local/
+              mc ilm rule ls "local/${BUCKET}"
+              echo ">> done"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # mc writes its config + the policy JSON under /tmp (MC_CONFIG_DIR);
+            # an emptyDir keeps the root fs read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

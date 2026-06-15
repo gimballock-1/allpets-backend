@@ -15,4 +15,10 @@ kind: Kustomization
 resources:
   - namespaces.yaml
   - networkpolicies/backend-database.yaml
+  - networkpolicies/allow-intra-namespace-postgres.yaml
+  - networkpolicies/allow-intra-namespace-minio.yaml
   - resource-budget.yaml
+  # Epic 4 — database substrate (Postgres + MinIO + nightly pg_dump).
+  # Secret templates (*.example.yaml) and the one-shot init/setup Jobs are
+  # intentionally NOT included here (see database/kustomization.yaml).
+  - database

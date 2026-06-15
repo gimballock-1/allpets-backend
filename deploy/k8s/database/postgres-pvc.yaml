@@ -1,0 +1,27 @@
+# allpets Postgres data PVC (issue 4.2)
+#
+# DELIBERATE FIX over the aarogya mirror reference: aarogya puts pgdata on an
+# emptyDir (EPHEMERAL — data lost on every pod restart). allpets is the LIVE
+# clinic site, so Postgres data lives on a REAL PersistentVolume.
+#
+# StorageClass: `local-path` is the ONLY class on this single-node k3s (default,
+# provisioner rancher.io/local-path, WaitForFirstConsumer, no volume expansion).
+# WaitForFirstConsumer means this PVC stays Pending until the Postgres pod
+# schedules — expected, not an error. local-path is node-pinned: fine on a single
+# node today; phase-2 multi-node migration must re-home this volume (see 2.9/Epic 1).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: allpets-database
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
