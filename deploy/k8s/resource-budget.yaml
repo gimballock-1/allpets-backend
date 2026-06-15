@@ -1,0 +1,99 @@
+# allpets co-tenant resource budget — backend/database/observability (issue 2.12)
+#
+# The Rev-5 keystone: allpets shares ONE 31 GiB / 16-vCPU node with aarogya
+# (healthcare prod), local-ai-proxy, home-assistant, etc. Without guardrails an
+# allpets memory spike could OOM-kill a neighbor. Each namespace gets:
+#   - a LimitRange: default request/limit (so a pod that forgets resources is
+#     still bounded) + a per-container max (so no single pod can be huge).
+#   - a ResourceQuota: hard aggregate cap on the namespace's total requests/limits.
+#
+# Budget (requests reserve scheduling; limits are kill ceilings):
+#   database  req 2 cpu / 8Gi   lim 6 cpu / 12Gi   (Postgres+ClickHouse+MinIO)
+#   backend   req 1.5 cpu / 4Gi lim 5 cpu / 8Gi    (Payload+Cal.com+Plausible app)
+#   observ.   req 0.5 cpu / .5Gi lim 1 cpu / 1Gi   (empty under reuse — protective)
+#   (frontend req 0.5 cpu / 1Gi is in the allpets-frontend repo)
+# Total allpets requests ~4 cpu / 13.5Gi of 16/31 — leaves wide headroom for the
+# co-tenants (which currently reserve ~2.4Gi). App epics set each pod's values
+# within these caps. Relief levers if pressure hits: Plausible Cloud -> trim
+# retention -> Epic-1 migration (documented in 2.9 deployment.md).
+
+#############################  allpets-database  #############################
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: allpets-database
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: 100m, memory: 256Mi }
+      default: { cpu: 250m, memory: 512Mi }
+      max: { cpu: "4", memory: 8Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+  namespace: allpets-database
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 8Gi
+    limits.cpu: "6"
+    limits.memory: 12Gi
+
+#############################  allpets-backend  #############################
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: allpets-backend
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: 100m, memory: 256Mi }
+      default: { cpu: 250m, memory: 512Mi }
+      max: { cpu: "3", memory: 4Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+  namespace: allpets-backend
+spec:
+  hard:
+    requests.cpu: "1500m"
+    requests.memory: 4Gi
+    limits.cpu: "5"
+    limits.memory: 8Gi
+
+#########################  allpets-observability  #########################
+# Empty under the "reuse the shared observability stack" decision; a minimal
+# protective budget so nothing unbounded can ever land here. Removed/retuned if
+# the namespace is dropped when observability is finalized (2.7/2.11).
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: allpets-observability
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: 50m, memory: 64Mi }
+      default: { cpu: 100m, memory: 128Mi }
+      max: { cpu: "1", memory: 1Gi }
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+  namespace: allpets-observability
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: 512Mi
+    limits.cpu: "1"
+    limits.memory: 1Gi
