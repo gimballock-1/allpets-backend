@@ -1,0 +1,39 @@
+# allpets backend/shared namespaces (issue 2.5)
+#
+# Backend + shared-substrate namespaces only. The `allpets-frontend` namespace
+# is frontend infra and lives in the allpets-frontend repo
+# (allpets-frontend/deploy/k8s/namespace.yaml).
+#
+# NetworkPolicies (2.6) and ResourceQuota/LimitRange (2.12) key off the
+# `app.kubernetes.io/part-of: allpets` label.
+#
+# Workload -> namespace map (req §9, spec 2.5):
+#   allpets-backend       Payload CMS, Cal.com, Plausible app, GlitchTip
+#   allpets-database      Postgres (CNPG), ClickHouse, MinIO
+#   allpets-observability Prometheus, Grafana, Loki, promtail, Uptime Kuma
+#                         (dedicated stack — owner decision 2026-06-14, NOT the
+#                         shared cluster observability namespace)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: backend
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: allpets-database
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: database
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: allpets-observability
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: observability
