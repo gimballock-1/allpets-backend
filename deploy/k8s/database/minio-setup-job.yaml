@@ -64,6 +64,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: mc
           image: minio/mc:RELEASE.2024-09-16T17-43-14Z
@@ -196,3 +197,16 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # mc writes its config + the policy JSON under /tmp (MC_CONFIG_DIR);
+            # an emptyDir keeps the root fs read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

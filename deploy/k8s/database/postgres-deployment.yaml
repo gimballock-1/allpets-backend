@@ -104,6 +104,11 @@ spec:
             limits:
               cpu: "2"
               memory: 4Gi
+          securityContext:
+            # The postgres image starts as root and gosu-drops to uid 999, so we
+            # can't runAsNonRoot/drop-ALL here — but no_new_privs is compatible
+            # with that drop and is cheap defense-in-depth.
+            allowPrivilegeEscalation: false
       volumes:
         - name: data
           persistentVolumeClaim:

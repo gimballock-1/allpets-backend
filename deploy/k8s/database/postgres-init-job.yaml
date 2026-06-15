@@ -47,6 +47,11 @@ spec:
         allpets.kinvee.in/tier: database
     spec:
       restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: psql
           # Same specific minor as the server (14.8) so behaviour matches exactly.
@@ -61,6 +66,12 @@ spec:
               value: postgres.allpets-database.svc.cluster.local
             - name: PGPORT
               value: "5432"
+            # writable HOME/TMP since readOnlyRootFilesystem is on (psql/libpq
+            # may touch $HOME); the script itself writes no files.
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
           command:
             - /bin/bash
             - -c
@@ -143,3 +154,14 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
