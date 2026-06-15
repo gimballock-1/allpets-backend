@@ -1,0 +1,166 @@
+# allpets canonical per-host Traefik Ingress — TEMPLATE (issue 3.4)
+#
+# !!! TEMPLATE, NOT DIRECTLY APPLIED FROM THIS REPO !!!
+# These blocks are the canonical shape every allpets public host copies. They are
+# NOT wired into deploy/k8s/kustomization.yaml because:
+#   1. An Ingress must live in the SAME namespace as the Service it targets, and
+#      the backend Services (5.13 Payload, 6.3 Cal.com, 11.1 Plausible, 7.8 site)
+#      DO NOT EXIST YET. Applying an Ingress whose backend Service is missing gives
+#      Traefik a dangling route (502/404), so we do not apply until the workload
+#      lands.
+#   2. The `allpets.kinvee.in` (site) Ingress is OWNED BY THE FRONTEND REPO
+#      (allpets-frontend/deploy/k8s/), because its backend Service lives in the
+#      `allpets-frontend` namespace which is defined there. 3.4 owns the PATTERN;
+#      7.8/5.13 fold this block into the frontend repo.
+#
+# HOW THIS GETS USED (see ./README.md for the full fold-in procedure):
+#   - 7.8 / 5.13  -> copy the `allpets.kinvee.in` block into allpets-frontend repo.
+#   - 6.3         -> copy the `book.allpets.kinvee.in` block into THIS repo,
+#                    next to the Cal.com Deployment/Service, add it to kustomize.
+#   - 11.1        -> copy the `analytics.allpets.kinvee.in` block into THIS repo,
+#                    next to the Plausible Deployment/Service, add it to kustomize.
+#
+# CANONICAL SHAPE (mirrors the live, proven local-ai/ai-proxy-ingress for
+# ai.kinvee.in on this exact box — same Traefik, same ClusterIssuer):
+#   apiVersion: networking.k8s.io/v1, kind: Ingress
+#   metadata.annotations: cert-manager.io/cluster-issuer: letsencrypt-prod
+#   spec.ingressClassName: traefik
+#   spec.tls: [{ hosts: [<host>], secretName: <host>-tls }]
+#   spec.rules: [{ host: <host>, http.paths: [{ /, Prefix -> Service:port }] }]
+#
+# DELIBERATE IMPROVEMENT over the ai.kinvee.in reference: ai.kinvee.in serves
+# plaintext HTTP with NO redirect. allpets adds a firm HTTP->HTTPS redirect (308)
+# via a per-namespace `redirect-https` Middleware referenced by the annotation
+#   traefik.ingress.kubernetes.io/router.middlewares: <ns>-redirect-https@kubernetescrd
+# This is SAFE because TLS is issued by cert-manager's DNS-01 solver (Route53 TXT
+# records), so there is NO /.well-known/acme-challenge HTTP path a redirect could
+# clobber. See ./README.md "HTTP->HTTPS redirect decision" and
+# ./redirect-middleware.template.yaml. allowCrossNamespace is OFF on this cluster,
+# so the Middleware MUST be created in EACH namespace that references it.
+#
+# ADMIN SURFACE (3.6 decision): APP-AUTH-ONLY. No basic-auth / forward-auth
+# middleware on Payload /admin or the Cal.com admin — mirrors the in-prod
+# admin.ai.kinvee.in pattern (plain Ingress, app login only) and keeps /admin
+# reachable by non-technical clinic staff from any device. Path stays `/` (the
+# whole host), Payload serves /admin itself. See ./README.md.
+#
+# NO Deployment spec, NO :latest image refs, NO container details live here —
+# this is ingress-only. Service names below are the INTENDED names from the
+# owning epics; reconcile the exact name/port when the Service is authored.
+# Backend ports below match the already-committed NetworkPolicy contract
+# (networkpolicies/backend-database.yaml allow-traefik-ingress): Cal.com 3000,
+# Plausible 8000.
+
+#############################################################################
+# HOST 1 — allpets.kinvee.in  (Next.js marketing site + Payload /admin)
+# Namespace: allpets-frontend   | tls secret: allpets-kinvee-in-tls
+# Owning epics: 7.8 (site), 5.13 (Payload /admin on the same host).
+# AUTHOR THIS IN THE allpets-frontend REPO (the allpets-frontend namespace and
+# its Service are defined there). Shown here only as the canonical pattern.
+#############################################################################
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: allpets-site-ingress
+  namespace: allpets-frontend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: frontend
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # HTTP->HTTPS 308 redirect. Requires a `redirect-https` Middleware in the
+    # allpets-frontend namespace (see redirect-middleware.template.yaml; the
+    # frontend repo carries its own copy). allowCrossNamespace is OFF.
+    traefik.ingress.kubernetes.io/router.middlewares: allpets-frontend-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [allpets.kinvee.in]
+      secretName: allpets-kinvee-in-tls
+  rules:
+    - host: allpets.kinvee.in
+      http:
+        paths:
+          # Whole host -> Next.js. Next.js reverse-proxies Payload /admin on the
+          # same origin (5.13), so a single `/` rule covers both. Do NOT split
+          # /admin into a second path here (app-auth-only, 3.6).
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: allpets-site        # 7.8: Next.js Service (intended name)
+                port:
+                  number: 3000            # 7.8: Next.js container port
+
+#############################################################################
+# HOST 2 — book.allpets.kinvee.in  (Cal.com self-hosted)
+# Namespace: allpets-backend    | tls secret: book-allpets-kinvee-in-tls
+# Owning epic: 6.3. AUTHOR THIS IN THIS REPO next to the Cal.com workload.
+# Cal.com gets its OWN host (cookies / OAuth callbacks, req §9) — never a path
+# under allpets.kinvee.in.
+#############################################################################
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: calcom-ingress
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: backend
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Requires a `redirect-https` Middleware in allpets-backend (this repo ships
+    # it via redirect-middleware.template.yaml -> fold into kustomize with 6.3).
+    traefik.ingress.kubernetes.io/router.middlewares: allpets-backend-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [book.allpets.kinvee.in]
+      secretName: book-allpets-kinvee-in-tls
+  rules:
+    - host: book.allpets.kinvee.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: calcom               # 6.3: Cal.com Service (intended name)
+                port:
+                  number: 3000             # 6.3: Cal.com web port (matches NetworkPolicy)
+
+#############################################################################
+# HOST 3 — analytics.allpets.kinvee.in  (Plausible CE)
+# Namespace: allpets-backend    | tls secret: analytics-allpets-kinvee-in-tls
+# Owning epic: 11.1. AUTHOR THIS IN THIS REPO next to the Plausible workload.
+#############################################################################
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: plausible-ingress
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.kinvee.in/tier: backend
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: allpets-backend-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [analytics.allpets.kinvee.in]
+      secretName: analytics-allpets-kinvee-in-tls
+  rules:
+    - host: analytics.allpets.kinvee.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: plausible            # 11.1: Plausible Service (intended name)
+                port:
+                  number: 8000             # 11.1: Plausible web port (matches NetworkPolicy)
