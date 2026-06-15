@@ -45,7 +45,7 @@ Apply: `kubectl apply -k deploy/k8s` (backend repo) **and**
 |---|---|
 | `allpets-frontend` | Next.js (defined in the **frontend** repo) |
 | `allpets-backend` | Payload, Cal.com, Plausible app, GlitchTip(deferred) |
-| `allpets-database` | Postgres/CNPG, ClickHouse, MinIO |
+| `allpets-database` | Postgres (plain Deployment, **not** CNPG — 4.1), ClickHouse, MinIO |
 | `allpets-observability` | reserved/empty (observability is reused — see 1.6) |
 
 ### 1.5 NetworkPolicies (2.6)
@@ -324,5 +324,341 @@ Service:
   `secretName: analytics-allpets-kinvee-in-tls`.
 When the first such Service is applied, run §2.8 steps 3–5 to bring its host fully
 online and complete the deferred 3.5 verification.
-## 3. Database & object storage ops (Epic 4 / 4.9) — _TBD_
+## 3. Database & object storage ops (Epic 4 / 4.9)
+
+> **Owner:** 4.9 (this section). **Source of truth** for operating allpets' data
+> tier on `quasar`: **Postgres** (Payload + Cal.com), **MinIO** (Payload media), and
+> the **nightly `pg_dump` backup**. Built on the **2026-06-15 owner decisions**,
+> which **override** the Epic-4 spec where they differ: (a) Postgres is a **plain
+> Deployment + PVC + Service**, *not* CloudNativePG (rationale + accepted trade-offs:
+> `allpets-backend/planning/database-decision.md`, 4.1); (b) **no off-site backups** —
+> Backblaze B2 (4.4 / 1.9) is **dropped**; the nightly `pg_dump` CronJob (4.5) to a
+> **local PVC** is the **primary and only** backup. Manifests live under
+> `deploy/k8s/database/`; the intra-namespace allows live under
+> `deploy/k8s/networkpolicies/`. **No secrets are inlined here** — only Secret names.
+
+### 3.1 Topology (what runs in `allpets-database`)
+- **Postgres** — plain `Deployment` (1 replica, `strategy: Recreate` — RWO PVC,
+  never two pods on one volume), pinned image `postgres:16.4` (digest preferred,
+  14.8). Data on a **`local-path` RWO PVC** (`postgres-pvc`, ~10–20Gi) mounted at
+  `/var/lib/postgresql/data` with `PGDATA=…/pgdata` (subdir avoids the `lost+found`
+  init failure). The pod **also mounts `pgdump-pvc` read-only at `/backups`** as the
+  standing arrangement (§3.6), so restores (§3.8) can read dumps without an ad-hoc
+  remount. `ClusterIP` Service **`postgres:5432`**. In-cluster DSN host:
+  `postgres.allpets-database.svc.cluster.local:5432`.
+- **MinIO** — standalone `StatefulSet` (1 replica; distributed needs ≥4 drives —
+  phase 2), pinned `quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z`
+  (**proposed pin — confirm/refresh the exact RELEASE date + digest on first
+  deploy**, 14.8), `volumeClaimTemplate` 10Gi `local-path` at `/data`. `ClusterIP`
+  Service **`minio`** with **9000** (S3 API) + **9001** (console, **not** publicly
+  exposed — tailnet / `port-forward` only, per §2.6 admin posture). Payload endpoint
+  (5.10): `http://minio.allpets-database.svc.cluster.local:9000`,
+  `forcePathStyle: true`, bucket **`allpets-media`** (**private** — Payload
+  serves/proxies media; no anonymous download).
+- **pg_dump CronJob** — `0 3 * * *`, dumps **both** DBs in custom format to the
+  `pgdump-pvc` (10Gi `local-path`, `/backups`), prunes archives >14 days.
+- **Databases & roles (4.3):** two DBs `payload` (owner role `payload_app`) and
+  `calcom` (owner role `calcom_app`). Each role has `LOGIN`, full DDL on **its own**
+  DB only; `CONNECT` on the other DB is **revoked**, and `CONNECT … FROM PUBLIC` is
+  revoked on both. Created on first boot by the initdb ConfigMap and (for an
+  already-running cluster) by the idempotent **`postgres-init` Job**.
+- All resource shapes set requests/limits within the **2.12** database quota
+  (req 2 cpu / 8Gi, lim 6 cpu / 12Gi): Postgres req 500m/1Gi lim 2cpu/4Gi · MinIO
+  req 250m/512Mi lim 1cpu/2Gi · `pg_dump` job req 100m/256Mi lim 500m/1Gi.
+
+### 3.2 Secrets (names only — never inlined; created out-of-band)
+The **14.6** GitHub-repo-secrets → k8s-Secret pipeline does **not exist yet**. The
+repo carries **templates only** (`*.example.yaml`, placeholder `REPLACE_ME`); the
+operator creates the **real** Secrets out-of-band with generated strong values
+(`openssl rand`), keeping the **names and keys stable** so apps keep consuming them.
+14.6 will own materialization/rotation later.
+
+| Secret (ns `allpets-database`) | keys | consumed by |
+|---|---|---|
+| `postgres-secret` | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` (bootstrap superuser+db); `PAYLOAD_APP_PASSWORD` / `CALCOM_APP_PASSWORD` (4.3 login roles) | Postgres Deployment (`envFrom`); `postgres-init` Job + initdb script (`env`); `pg_dump` CronJob (`secretKeyRef`) |
+| `minio-root-secret` | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO StatefulSet (`envFrom`); MinIO setup Job |
+| `minio-payload-key` | `MINIO_PAYLOAD_ACCESS_KEY` / `MINIO_PAYLOAD_SECRET_KEY` (scoped, least-priv) | MinIO setup Job provisions this user; Payload (5.10) uses it |
+
+Templates: `deploy/k8s/database/postgres-secret.example.yaml`,
+`deploy/k8s/database/minio-secret.example.yaml`. The `*.example.yaml` files are
+**excluded** from kustomize `resources` (they carry `REPLACE_ME`).
+
+### 3.3 Apply order (bring-up) — orchestrator wiring
+The orchestrator wires the **durable** manifests into `deploy/k8s/kustomization.yaml`
+(PVCs, ConfigMap, Services, StatefulSet, Deployment, CronJob, **and the two NEW
+NetworkPolicies in §3.4**). The **`*.example.yaml` templates** and the **one-shot
+Jobs** (`postgres-init`, `minio-setup`) are **not** in kustomize.
+
+> **⚠️ NET-NEW NetworkPolicies — MUST be added to kustomize (read §3.4 first).**
+> The 2.6 fact *"no new NetworkPolicy needed"* covered **only** the cross-namespace
+> `allpets-backend → allpets-database` flow. It does **not** cover the **in-namespace**
+> Job/CronJob → DB flows this epic introduces, which the committed
+> `default-deny-ingress` (podSelector `{}`) **drops**. Two new files —
+> **`deploy/k8s/networkpolicies/allow-intra-namespace-postgres.yaml`** and
+> **`deploy/k8s/networkpolicies/allow-setup-to-minio.yaml`** — **must be added to
+> `deploy/k8s/kustomization.yaml` `resources:` and applied BEFORE Postgres/MinIO and
+> the first Job/CronJob run.** If they are skipped, `postgres-init`, `minio-setup`,
+> and every `pgdump-nightly` run **hang on connect and fail silently** (timeout, not
+> error). This is the one place §3 knowingly deviates from an authoritative fact; the
+> deviation is correct (see §3.4).
+
+Order:
+
+1. **Real Secrets** (out-of-band, from the templates) → `postgres-secret`,
+   `minio-root-secret`, `minio-payload-key`.
+2. **PVCs + initdb ConfigMap + Services + the two §3.4 NetworkPolicies.**
+3. **Postgres Deployment** → wait ready
+   (`kubectl -n allpets-database rollout status deploy/postgres --timeout=180s`).
+4. **`postgres-init` Job** (idempotent roles/DBs) → wait
+   `--for=condition=complete`. (On a fresh PVC the initdb ConfigMap already created
+   everything on first boot; the Job is then a harmless no-op and the safety net for
+   an already-initialized cluster. Re-running it also re-asserts the full 4.3
+   REVOKE/GRANT posture in one shot — see §3.8.)
+5. **MinIO StatefulSet** → wait ready
+   (`kubectl -n allpets-database rollout status statefulset/minio`).
+6. **`minio-setup` Job** (bucket + scoped policy + scoped user + `tmp/` ILM) → wait
+   `--for=condition=complete`. The Job self-verifies the user/policy/attachment and
+   exits non-zero on failure, so the wait is a trustworthy gate.
+7. **`pgdump-pvc` + `pgdump-nightly` CronJob** — after Postgres is ready, the §3.4
+   policies are in place, **and** the roles exist (the CronJob authenticates as
+   `payload_app` / `calcom_app`). `pgdump-pvc` is also mounted read-only on the
+   Postgres pod (§3.1) so restores can read dumps directly.
+
+Job pod templates are immutable; to **re-run** any one-shot Job after an edit,
+`kubectl -n allpets-database delete job <name>` then re-apply.
+
+### 3.4 NetworkPolicy — the intra-namespace gap (NET-NEW; deviation from 2.6)
+The committed `networkpolicies/backend-database.yaml` (2.6) puts
+**`default-deny-ingress`** (`podSelector: {}`) on **every** `allpets-database` pod
+and allows ingress **only** from the `observability` (scrape) and `allpets-backend`
+(5432/9000/8123) namespaces. NetworkPolicy does **not** exempt same-namespace traffic
+once a pod is selected, and k3s' embedded kube-router controller **enforces** this.
+The **`postgres-init` Job**, the **`pg_dump` CronJob**, and the **`minio-setup` Job**
+all run **inside** `allpets-database` and connect to `postgres:5432` / `minio:9000`
+**in-namespace** — so without an explicit allow their connections are **dropped** and
+they hang until timeout, then fail.
+
+This is a **deviation from the 2.6 "no new NetworkPolicy needed" fact**, which was
+true only for the cross-namespace backend→database flow; it did **not** anticipate
+these in-namespace Job→DB flows. Two tightly-scoped, **NET-NEW** policies under
+`deploy/k8s/networkpolicies/` close the gap (**durable — the orchestrator MUST add
+both to `deploy/k8s/kustomization.yaml`, see §3.3**):
+- **`allow-intra-namespace-postgres.yaml`** — ingress to the Postgres pod
+  (`podSelector` `app.kubernetes.io/name: postgres`) on **TCP 5432** from
+  same-namespace pods. Unblocks the init Job **and** the nightly backup.
+- **`allow-setup-to-minio.yaml`** — ingress to the MinIO pod on **TCP 9000** from
+  the setup-Job pod (least-privilege `from` scoped to its
+  `app.kubernetes.io/component: setup` labels).
+
+Both must be applied **before** Postgres/MinIO and the first Job/backup run.
+The `verify-isolation` check (§3.5) uses `kubectl exec` over the **local socket**, so
+it works regardless of NetworkPolicy.
+
+### 3.5 Verify role isolation (4.3 acceptance) — run after EVERY restore
+Connecting as `payload_app` to the `calcom` DB **must be denied**; writing to its own
+DB must succeed. Runs over the in-pod local socket — independent of NetworkPolicy.
+**Run this after every restore (§3.8), not only ownership-touching ones**, and after
+the bring-up `postgres-init` Job:
+```bash
+# expect: FATAL: permission denied for database "calcom"
+kubectl -n allpets-database exec deploy/postgres -- \
+  sh -c 'PGPASSWORD="$PAYLOAD_APP_PASSWORD" psql -U payload_app -d calcom -c "select 1"'
+# expect: success (owns its own DB)
+kubectl -n allpets-database exec deploy/postgres -- \
+  sh -c 'PGPASSWORD="$PAYLOAD_APP_PASSWORD" psql -U payload_app -d payload -c "create table _t(i int); drop table _t;"'
+```
+If isolation is *not* as expected, re-run the idempotent `postgres-init` Job to
+re-assert the full 4.3 REVOKE/GRANT posture in one shot, rather than hand-running
+individual statements:
+```bash
+kubectl -n allpets-database delete job postgres-init --ignore-not-found
+kubectl -n allpets-database apply -f deploy/k8s/database/postgres-init-job.yaml
+kubectl -n allpets-database wait --for=condition=complete job/postgres-init --timeout=120s
+```
+
+### 3.6 Backup — what the nightly job does
+- **CronJob `pgdump-nightly`**, schedule **`0 3 * * *`** (`concurrencyPolicy:
+  Forbid`, `restartPolicy: OnFailure`, history limits 7/7), image matched to the
+  server (`postgres:16.4` client; client major ≥ server). For **each** of `payload`
+  and `calcom`: `pg_dump --format=custom` → `/backups/<db>-<UTC-stamp>.dump` (atomic
+  `.partial`-then-`mv`). **Rotation:** `find /backups -name '*.dump' -mtime +14
+  -delete` in the same run (**14-day** retention). Authenticates per-DB as the app
+  role using `PAYLOAD_APP_PASSWORD` / `CALCOM_APP_PASSWORD` from `postgres-secret`
+  (no superuser, no plaintext). A root `fix-perms` initContainer (CHOWN-only) chowns
+  `/backups` to the Postgres image's runtime UID/GID (**expected `999:999` for the
+  Debian `postgres` image — confirm on first deploy**, §3.10) for the `local-path`
+  (hostPath-backed) volume.
+- **Confirm `0 3 * * *` is clear** of co-tenant nightly jobs (`aarogya`,
+  `local-ai-proxy`) on quasar; if it contends, shift a slot (e.g. `0 4 * * *`) and
+  record it here. Low risk given `Forbid` + the small ceiling (lim 500m/1Gi).
+- **Smoke-test on first deploy** (also exercises the §3.4 policy). The Postgres pod
+  mounts `pgdump-pvc` read-only at `/backups` (§3.1), so verify there:
+  ```bash
+  kubectl -n allpets-database create job --from=cronjob/pgdump-nightly pgdump-manual-verify
+  kubectl -n allpets-database wait --for=condition=complete job/pgdump-manual-verify --timeout=180s
+  kubectl -n allpets-database logs job/pgdump-manual-verify
+  # confirm both files exist AND are owned by the dump UID (expected 999:999):
+  kubectl -n allpets-database exec deploy/postgres -- ls -ln /backups
+  kubectl -n allpets-database delete job pgdump-manual-verify
+  ```
+
+### 3.7 Backup-coverage matrix (HONEST — gaps are accepted, not hidden)
+There is **no off-site copy of anything** in phase 1. `local-path` is node-pinned and
+hostPath-backed: the database PVC and the backup PVC live on the **same disk in the
+same box**, so a disk/host loss loses **both** the live data and its backups. This is
+an **owner-accepted** phase-1 trade-off (4.1); the off-site/NAS story is **phase 2**.
+
+| Source | What protects it | Off-site? | RPO | PITR? | Status |
+|---|---|---|---|---|---|
+| Postgres `payload` | nightly `pg_dump --format=custom` → `pgdump-pvc` (local), 14-day retention | **No** (same box) | **≤ 24h** (last 03:00 run) | **No** | **Backed up, accepted gap** (same-box) |
+| Postgres `calcom` | nightly `pg_dump --format=custom` → `pgdump-pvc` (local), 14-day retention | **No** (same box) | **≤ 24h** | **No** | **Backed up, accepted gap** (same-box) |
+| MinIO media (`allpets-media`) | **live `local-path` PVC only** — *no* dump/replication | **No** | **∞ / none** (loss = total media loss) | n/a | **GAP, accepted** — re-uploadable from source-of-truth content; not disaster-proof |
+| Plausible ClickHouse | **out of Epic-4 scope** — owned by **11.6** | — | — | — | **Deferred to 11.6** |
+
+- **RPO ≈ 24h** for both Postgres DBs (worst case: a loss at 02:59 forfeits ~a day
+  of writes). **No PITR** (no WAL archiving / continuous backup in phase 1).
+- **MinIO media is the weakest link**: only the live volume protects it. If media
+  durability matters before phase 2, the lever is an `mc mirror` of `allpets-media`
+  to a second target — **not** in scope here.
+
+### 3.8 Restore a Postgres DB from a `pg_dump` archive
+Custom-format dumps restore with `pg_restore`. **`--clean --create` must run as the
+bootstrap superuser** (`POSTGRES_USER`): it issues `DROP DATABASE` / `CREATE DATABASE`,
+which the app role (`payload_app` / `calcom_app`, `LOGIN`-only, no `CREATEDB`) **cannot**
+do. Do **not** pass `--role=<db>_app` here — `--role` does `SET ROLE` *before*
+`--create` runs the DDL, so the DROP/CREATE would execute as the unprivileged app role
+and fail on a clean machine. Ownership is reassigned to the app role in a **separate**
+step after the load. Copy-paste (example: restore `payload`):
+```bash
+NS=allpets-database
+DB=payload                                  # or: calcom
+
+# 1. Pick the archive to restore. The postgres pod mounts pgdump-pvc read-only at
+#    /backups (see §3.1), so list and choose from there:
+kubectl -n "$NS" exec deploy/postgres -- sh -c 'ls -1t /backups/'"$DB"'-*.dump | head'
+DUMP=/backups/payload-2026-06-15.dump       # set to the chosen file
+#    --- If the postgres pod does NOT mount pgdump-pvc (older manifest), land the
+#        dump on the pod first instead of the line above:
+#        kubectl -n "$NS" cp ./payload-2026-06-15.dump postgres-<pod>:/tmp/restore.dump
+#        DUMP=/tmp/restore.dump
+
+# 2. Stop the consuming app first (avoid writes during restore):
+#    Payload runs in allpets-backend (5.x); Cal.com in allpets-backend (6.x).
+kubectl -n allpets-backend scale deploy/payload --replicas=0      # adjust to the real Deployment name
+#    (for calcom:  kubectl -n allpets-backend scale deploy/calcom --replicas=0)
+
+# 3. Restore as the SUPERUSER with --clean --create (NO --role — DROP/CREATE need
+#    superuser rights):
+kubectl -n "$NS" exec -i deploy/postgres -- sh -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" pg_restore \
+    --username="$POSTGRES_USER" --dbname=postgres \
+    --clean --create --if-exists --no-owner \
+    --exit-on-error '"$DUMP"'
+'
+#   --clean --create --if-exists : drop & recreate $DB, suppress "does not exist" noise
+#   --no-owner                   : objects load owned by the connecting superuser;
+#                                  ownership is reassigned to the app role in step 4
+
+# 4. Reassign ownership to the app role and re-assert the 4.3 scoped posture
+#    (idempotent; safe to re-run):
+kubectl -n "$NS" exec deploy/postgres -- sh -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "ALTER DATABASE '"$DB"' OWNER TO '"$DB"'_app;"
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d '"$DB"' -v ON_ERROR_STOP=1 \
+    -c "REASSIGN OWNED BY '"$DB"'_app TO '"$DB"'_app;" \
+    -c "REVOKE CONNECT ON DATABASE '"$DB"' FROM PUBLIC;" \
+    -c "GRANT ALL ON DATABASE '"$DB"' TO '"$DB"'_app;"
+'
+#    Simpler alternative to hand-running the above: re-run the idempotent
+#    postgres-init Job (§3.5), which re-asserts the FULL 4.3 REVOKE/GRANT posture
+#    for BOTH DBs (incl. the cross-DB CONNECT revokes a single --create can't touch).
+
+# 5. Verify role isolation (§3.5 — REQUIRED after every restore), sanity-check, then
+#    scale the app back up:
+kubectl -n "$NS" exec deploy/postgres -- sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d '"$DB"' -c "\dt" | head'
+#    -> run the two §3.5 isolation commands here <-
+kubectl -n allpets-backend scale deploy/payload --replicas=1     # restore the real replica count
+```
+> **Cross-DB isolation:** a `--create` of one DB does **not** touch the other DB's
+> grants, so the §3.5 check normally still passes — but **run §3.5 after every
+> restore** regardless. The one-shot `postgres-init` Job (§3.5) is the fastest way to
+> re-assert the complete 4.3 posture (both DBs' `REVOKE CONNECT … FROM PUBLIC` and the
+> cross-DB `REVOKE CONNECT` that scopes each role to its own DB) without
+> hand-running individual `GRANT`/`REVOKE` statements.
+>
+> **Alternative path (no `--create`):** if you prefer not to drop the DB, pre-create
+> it owned by `${DB}_app` and restore with `--no-owner --role=${DB}_app` into the
+> existing DB (omit `--clean --create`). That keeps `SET ROLE` valid because no
+> database-level DDL runs.
+
+### 3.9 Credential rotation
+All rotations change the **value** in the k8s Secret **and** the matching DB/MinIO
+credential, then restart the consumers. Names/keys stay stable (§3.2). 14.6 will own
+this once its pipeline exists; until then it is a manual, out-of-band operation.
+
+**Postgres app roles (`payload_app` / `calcom_app`):**
+```bash
+NS=allpets-database
+NEWPW=$(openssl rand -base64 24)
+# 1. Change the role password in Postgres (example: payload_app):
+kubectl -n "$NS" exec deploy/postgres -- sh -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "ALTER ROLE payload_app WITH PASSWORD '"'"''"$NEWPW"''"'"';"'
+# 2. Update the Secret key (PAYLOAD_APP_PASSWORD / CALCOM_APP_PASSWORD) — do this
+#    out-of-band; never commit the value:
+kubectl -n "$NS" patch secret postgres-secret --type merge \
+  -p "{\"stringData\":{\"PAYLOAD_APP_PASSWORD\":\"$NEWPW\"}}"
+# 3. Restart consumers so they pick up the new env (the app, and the backup picks it
+#    up on its next run automatically):
+kubectl -n allpets-backend rollout restart deploy/payload
+```
+> The **bootstrap superuser** (`POSTGRES_USER/PASSWORD`) is the same pattern but
+> higher-risk: `ALTER ROLE`, patch `postgres-secret`, then
+> `kubectl -n allpets-database rollout restart deploy/postgres`. Avoid unless needed.
+
+**MinIO keys:**
+- **Scoped Payload key** (`minio-payload-key`) — preferred rotation path. Mint a new
+  scoped user via `mc admin user add` (root creds), attach the same scoped policy,
+  patch `MINIO_PAYLOAD_ACCESS_KEY` / `MINIO_PAYLOAD_SECRET_KEY` in the Secret,
+  `rollout restart` Payload, then `mc admin user remove` the old key. (Re-running the
+  `minio-setup` Job after updating the Secret achieves the same provisioning step.)
+- **MinIO root** (`minio-root-secret`) — rotate the root creds, patch the Secret,
+  `kubectl -n allpets-database rollout restart statefulset/minio`. Higher blast
+  radius; rotate the scoped key first.
+
+**⚠️ DO NOT ROTATE — `CALENDSO_ENCRYPTION_KEY` (Cal.com):** this is **not** a
+database/MinIO credential and is **not** in scope of the rotations above, but it is
+the most dangerous "secret" near this tier. Cal.com uses
+`CALENDSO_ENCRYPTION_KEY` to **encrypt data at rest in the `calcom` database**
+(credentials, API keys, integration tokens). **Changing it makes all existing
+encrypted rows undecryptable** — connected calendars/integrations break with no
+recovery short of re-entering them. **Never** rotate it as part of a routine DB
+password rotation, and **keep it identical** across any restore/re-deploy of Cal.com
+(a `calcom` restore from §3.8 is only usable with the *same* key that was in effect
+when the dump was taken). It is owned by the Cal.com app config (Epic 6), not Epic 4 —
+flagged here so a "rotate all the DB secrets" sweep does not silently destroy Cal.com
+data.
+
+### 3.10 Image pinning & known follow-ups (proposals to confirm on first deploy)
+- **Pin to digest before production** (14.8): manifests currently pin **tags**
+  (`postgres:16.4`, `quay.io/minio/minio:RELEASE.2024-09-22T00-33-43Z`,
+  `minio/mc:RELEASE.2024-09-16T17-43-14Z`). These exact tags are **proposals to
+  confirm** when the `deploy/k8s/database/` manifests first land — pick the current
+  stable RELEASE dates, then resolve and substitute digests:
+  `docker buildx imagetools inspect postgres:16.4 --format '{{.Manifest.Digest}}'`.
+  Keep tag+digest in sync across `postgres-deployment.yaml`,
+  `postgres-init-job.yaml`, and `pgdump-cronjob.yaml`.
+- **MinIO UID/GID smoke-test (verify, don't assume):** the StatefulSet is **proposed**
+  to run MinIO as `runAsNonRoot` UID/GID 1000 with `fsGroup: 1000`, and the `pg_dump`
+  `fix-perms` initContainer is proposed to chown `/backups` to `999:999` (the Debian
+  `postgres` image's expected runtime UID/GID). **Both UIDs are image-default
+  expectations to confirm on first deploy, not guarantees.** If MinIO CrashLoops on a
+  fresh volume with `/data` / `.minio.sys` permission errors, drop
+  `runAsUser`/`runAsGroup` (let the image's own user run) but **keep `fsGroup: 1000`**.
+  If the backup files come up with an unexpected owner, adjust the `fix-perms` target
+  to the UID shown by `kubectl exec deploy/postgres -- id`.
+- **Single source of truth:** this §3 is the only operational runbook for the data
+  tier. The 4.1 **decision/rationale** lives in `planning/database-decision.md`
+  (links back here); the build manifests live in `deploy/k8s/database/`. Do not fork
+  a competing runbook file.
 ## 4. CI/CD + rollback (Epic 15 / 15.8) — _TBD_
