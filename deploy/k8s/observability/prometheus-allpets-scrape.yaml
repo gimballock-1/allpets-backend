@@ -1,0 +1,58 @@
+# Prometheus scrape additions for allpets per-pod usage metrics (issue 2.7)
+#
+# These are NOT a standalone applyable resource — they are scrape_configs jobs to
+# MERGE into the shared `observability/prometheus-config` ConfigMap's prometheus.yml
+# (which currently uses static_configs and has no cAdvisor). Purely additive; also
+# gives the whole cluster container-usage metrics it currently lacks. Apply only
+# with owner sign-off (shared infra serving aarogya/local-ai), then restart/reload
+# the Prometheus pod.
+#
+# ----- paste under scrape_configs: in observability/prometheus-config -----
+#
+#   # cAdvisor (container CPU/RAM usage) via the kubelet, for every pod incl. allpets
+#   - job_name: 'kubernetes-cadvisor'
+#     scheme: https
+#     tls_config:
+#       ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+#       insecure_skip_verify: true
+#     bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+#     kubernetes_sd_configs:
+#       - role: node
+#     relabel_configs:
+#       - action: labelmap
+#         regex: __meta_kubernetes_node_label_(.+)
+#       - target_label: __address__
+#         replacement: kubernetes.default.svc:443
+#       - source_labels: [__meta_kubernetes_node_name]
+#         regex: (.+)
+#         target_label: __metrics_path__
+#         replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+#
+#   # allpets app /metrics via pod autodiscovery (opt-in: pods annotated
+#   # prometheus.io/scrape: "true"), restricted to allpets namespaces
+#   - job_name: 'allpets-pods'
+#     kubernetes_sd_configs:
+#       - role: pod
+#         namespaces:
+#           names: [allpets-frontend, allpets-backend, allpets-database]
+#     relabel_configs:
+#       - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+#         action: keep
+#         regex: "true"
+#       - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+#         action: replace
+#         target_label: __metrics_path__
+#         regex: (.+)
+#       - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+#         action: replace
+#         regex: ([^:]+)(?::\d+)?;(\d+)
+#         replacement: $1:$2
+#         target_label: __address__
+#       - source_labels: [__meta_kubernetes_namespace]
+#         target_label: namespace
+#       - source_labels: [__meta_kubernetes_pod_name]
+#         target_label: pod
+#
+# NOTE: the shared Prometheus ServiceAccount must be allowed to read nodes/proxy
+# for cAdvisor (k3s default admin SA already can; a scoped SA needs a ClusterRole
+# with `nodes/proxy` get). Verify RBAC before relying on the cadvisor job.
