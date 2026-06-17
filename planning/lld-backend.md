@@ -53,7 +53,7 @@ flowchart TB
     external["SMTP relay + Google Places API"]
 
     visitor -->|"https allpets.kinvee.in (pages + same-origin /api/* proxy)"| site
-    site -->|"server-side /api proxy: POST /contact, GET /reviews (cross-origin, CORS)"| api
+    site -->|"server-side /api proxy → public host via Traefik (not in-cluster): POST /contact, GET /reviews (cross-origin, CORS)"| api
     visitor -->|"https book.allpets.kinvee.in"| calcom
     visitor -->|"https analytics.allpets.kinvee.in + /js/script.js"| plausible
 
