@@ -35,9 +35,11 @@
 # allpets-database quota (req 2cpu/8Gi, lim 6cpu/12Gi) and the LimitRange max
 # (4cpu/8Gi), even alongside Postgres + MinIO.
 #
-# Restore (runbook 4.9): copy a *.dump off the pgdump-pvc and run
-#   pg_restore --clean --if-exists -d <db> <db>-<stamp>.dump
-# against the target database as its owning role.
+# Restore (runbook deployment.md §3.8): copy a *.dump off the pgdump-pvc (via a
+# short-lived reader pod) and run, AS THE BOOTSTRAP SUPERUSER (the app role lacks
+# CREATE/DROP DATABASE), then reassign ownership to <db>_app:
+#   pg_restore --clean --create --if-exists --no-owner -d postgres <db>-<stamp>.dump
+# See deployment.md §3.8 for the full procedure.
 ---
 apiVersion: batch/v1
 kind: CronJob
