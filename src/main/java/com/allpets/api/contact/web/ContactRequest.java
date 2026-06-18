@@ -25,7 +25,10 @@ public record ContactRequest(
         @Size(max = 5000)
         String message,
 
-        // Honeypot — must stay empty. Full anti-spam (incl. the field contract with the
-        // site form, 8.10) is owned by 14.3; this is the minimal server-side trap.
+        // Honeypot — must stay empty. Not a reject constraint (a filled honeypot is
+        // silently accepted, not 400'd), but @Size caps the payload so a bot can't use it
+        // as an amplification vector. Full anti-spam (field contract with the site form,
+        // 8.10) is owned by 14.3.
+        @Size(max = 200)
         String website) {
 }

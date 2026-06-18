@@ -2,6 +2,7 @@ package com.allpets.api.contact;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -89,6 +90,20 @@ class ContactEndpointTest extends PostgresIntegrationTest {
         assertThat(r.getBody()).containsEntry("status", "received");
         assertThat(repository.count()).isEqualTo(before);
         verify(emailNotifier, never()).sendContactNotification(any());
+    }
+
+    @Test
+    void notifierFailureIsNonFatalAndSubmissionPersists() {
+        // A mail failure must NOT roll back the persisted submission nor surface as 5xx (LLD §6).
+        doThrow(new RuntimeException("smtp down")).when(emailNotifier).sendContactNotification(any());
+        long before = repository.count();
+
+        ResponseEntity<Map> r = rest.postForEntity("/contact",
+                Map.of("name", "Jamie", "email", "jamie@example.com", "message", "still saved?"),
+                Map.class);
+
+        assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(repository.count()).isEqualTo(before + 1);   // persisted despite the send failure
     }
 
     @Test

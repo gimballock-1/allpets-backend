@@ -36,6 +36,8 @@ public class ContactController {
     public ResponseEntity<Map<String, String>> submit(@Valid @RequestBody ContactRequest request,
                                                        HttpServletRequest http) {
         // X-Forwarded-For is honoured via server.forward-headers-strategy=framework.
+        // NOTE for 14.2: inbound XFF is client-spoofable, so the per-IP limiter is only
+        // sound if Traefik strips/overwrites XFF at the edge (trust just Traefik's hop).
         String clientIp = http.getRemoteAddr();
 
         if (!rateLimiter.tryAcquire(clientIp)) {
