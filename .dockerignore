@@ -1,0 +1,14 @@
+# Keep the build context small + reproducible (context = repo root).
+.git
+.gradle
+build
+deploy/k8s
+planning
+*.md
+.github
+.idea
+.vscode
+*.iml
+.DS_Store
+*.env
+.env
