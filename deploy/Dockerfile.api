@@ -35,6 +35,7 @@ EXPOSE 8080
 
 # Respect the container memory limit so the JVM heap stays inside the pod cap
 # (LLD §8 — an unbounded JVM is a co-tenant OOM-kill risk on quasar).
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport"
+# (UseContainerSupport + cgroup awareness are on by default since JDK 10.)
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

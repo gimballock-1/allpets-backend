@@ -51,7 +51,8 @@ class ActuatorEndpointsTest {
     void infoExposesBuildTraceability() {
         ResponseEntity<String> r = rest.getForEntity("/actuator/info", String.class);
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(r.getBody()).contains("git").contains("build");
+        // Pin the info.env contributor shape, not just loose substrings.
+        assertThat(r.getBody()).contains("\"git\":{\"sha\":").contains("\"build\":{\"time\":");
     }
 
     @Test
