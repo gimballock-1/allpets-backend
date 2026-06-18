@@ -3,7 +3,7 @@
 # PRIMARY AND ONLY backup. There is NO off-site copy: Backblaze B2 (old 4.4/1.9)
 # was DROPPED by owner decision (2026-06-15). The whole backup story for allpets
 # is the nightly pg_dump CronJob (pgdump-cronjob.yaml) writing custom-format dumps
-# of the `payload` and `calcom` databases here, with 14-day rotation.
+# of the `appdb` and `calcom` databases here, with 14-day rotation.
 #
 # Owner-accepted trade-offs (documented so future-me isn't surprised):
 #   - SAME-BOX backups. local-path is node-pinned to quasar; if that disk dies,

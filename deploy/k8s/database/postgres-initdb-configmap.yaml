@@ -10,21 +10,21 @@
 #
 # AAROGYA SHAPE, mirrored: init SQL via a ConfigMap at /docker-entrypoint-initdb.d.
 # IMPROVEMENT: a .sh (not a .sql) so role passwords are read from ENV
-# ($PAYLOAD_APP_PASSWORD / $CALCOM_APP_PASSWORD, sourced from the postgres-secret)
+# ($APP_SVC_PASSWORD / $CALCOM_APP_PASSWORD, sourced from the postgres-secret)
 # and NEVER hardcoded. ON_ERROR_STOP=1 aborts the bootstrap on any failure.
 #
 # Topology (4.3):
-#   db `payload`  owner role `payload_app`
+#   db `appdb`  owner role `app_svc`
 #   db `calcom`   owner role `calcom_app`
 # Each role: LOGIN; owns + full DDL on its OWN db only (db owner + owns the
 # public schema there); REVOKE CONNECT on the OTHER db; REVOKE CONNECT FROM
 # PUBLIC on both (so only the owning role can connect). Verify-isolation intent
-# (4.9): psql as payload_app to calcom must be DENIED.
+# (4.9): psql as app_svc to calcom must be DENIED.
 #
-# EXTENSIONS: the commonly-needed extensions for Payload/Cal.com migrations are
-# pre-created per-db AS SUPERUSER here (pgcrypto, uuid-ossp, citext, pg_trgm — all
+# EXTENSIONS: the commonly-needed extensions for Spring/Flyway + Cal.com migrations
+# are pre-created per-db AS SUPERUSER here (pgcrypto, uuid-ossp, citext, pg_trgm — all
 # 'trusted' on PG16). The non-superuser app roles cannot CREATE EXTENSION for
-# untrusted ones, so we create them now to avoid a migration failure in 5.10/6.x.
+# untrusted ones, so we create them now to avoid a migration failure in 20.2/6.x.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,7 +42,7 @@ data:
     # env (the postgres-secret), never hardcoded.
     set -euo pipefail
 
-    : "${PAYLOAD_APP_PASSWORD:?PAYLOAD_APP_PASSWORD must be set (from postgres-secret)}"
+    : "${APP_SVC_PASSWORD:?APP_SVC_PASSWORD must be set (from postgres-secret)}"
     : "${CALCOM_APP_PASSWORD:?CALCOM_APP_PASSWORD must be set (from postgres-secret)}"
 
     # psql connects over the local socket as the superuser to the bootstrap db.
@@ -55,39 +55,39 @@ data:
     #    (:'var') so they are properly quoted and never interpolated into the SQL
     #    text by the shell.
     psql_super \
-      -v payload_pw="$PAYLOAD_APP_PASSWORD" \
+      -v app_svc_pw="$APP_SVC_PASSWORD" \
       -v calcom_pw="$CALCOM_APP_PASSWORD" <<-'SQL'
-      CREATE ROLE payload_app WITH LOGIN PASSWORD :'payload_pw';
+      CREATE ROLE app_svc WITH LOGIN PASSWORD :'app_svc_pw';
       CREATE ROLE calcom_app  WITH LOGIN PASSWORD :'calcom_pw';
 
       -- 2) Databases, each OWNED by its app role (full DDL on its own db).
-      CREATE DATABASE payload OWNER payload_app;
+      CREATE DATABASE appdb OWNER app_svc;
       CREATE DATABASE calcom  OWNER calcom_app;
     SQL
 
     # 3) Per-db hardening. CONNECT-revokes + public-schema ownership must run with
     #    the right db context. REVOKE CONNECT FROM PUBLIC on both; each role keeps
     #    CONNECT only on its OWN db (granted explicitly below). Cross-db CONNECT is
-    #    explicitly revoked so payload_app cannot reach calcom and vice versa. The
+    #    explicitly revoked so app_svc cannot reach calcom and vice versa. The
     #    owning role also OWNS the public schema of its db -> full DDL.
     psql_super <<-'SQL'
-      REVOKE CONNECT ON DATABASE payload FROM PUBLIC;
+      REVOKE CONNECT ON DATABASE appdb FROM PUBLIC;
       REVOKE CONNECT ON DATABASE calcom  FROM PUBLIC;
       -- belt-and-suspenders cross-db revoke (also covered by FROM PUBLIC above):
-      REVOKE CONNECT ON DATABASE calcom  FROM payload_app;
-      REVOKE CONNECT ON DATABASE payload FROM calcom_app;
-      GRANT  CONNECT ON DATABASE payload TO payload_app;
+      REVOKE CONNECT ON DATABASE calcom  FROM app_svc;
+      REVOKE CONNECT ON DATABASE appdb FROM calcom_app;
+      GRANT  CONNECT ON DATABASE appdb TO app_svc;
       GRANT  CONNECT ON DATABASE calcom  TO calcom_app;
     SQL
 
     # 4) public-schema ownership inside each db (Postgres 15+: public no longer
     #    grants CREATE to PUBLIC, so the app role must own the schema for full DDL),
     #    AND pre-create the commonly-needed trusted extensions as superuser so the
-    #    non-superuser app roles never have to (avoids 5.10/6.x migration failures).
+    #    non-superuser app roles never have to (avoids 20.2/6.x migration failures).
     # NB: psql -c flags, NOT a heredoc. An indented heredoc inside this for-loop
     # has a space-indented terminator and <<- strips only TABS, so a YAML-embedded
     # heredoc here runs to EOF and aborts the script. -c flags avoid that.
-    for pair in "payload:payload_app" "calcom:calcom_app"; do
+    for pair in "appdb:app_svc" "calcom:calcom_app"; do
       db="${pair%%:*}"; owner="${pair##*:}"
       psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" \
         -c "ALTER SCHEMA public OWNER TO ${owner};" \

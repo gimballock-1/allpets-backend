@@ -77,7 +77,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              : "${PAYLOAD_APP_PASSWORD:?PAYLOAD_APP_PASSWORD must be set}"
+              : "${APP_SVC_PASSWORD:?APP_SVC_PASSWORD must be set}"
               : "${CALCOM_APP_PASSWORD:?CALCOM_APP_PASSWORD must be set}"
 
               export PGPASSWORD="$POSTGRES_PASSWORD"
@@ -89,17 +89,17 @@ spec:
               done
 
               echo "[init] ensuring roles (create-if-absent, always re-assert password)..."
-              SUPER -v payload_pw="$PAYLOAD_APP_PASSWORD" -v calcom_pw="$CALCOM_APP_PASSWORD" <<-'SQL'
+              SUPER -v app_svc_pw="$APP_SVC_PASSWORD" -v calcom_pw="$CALCOM_APP_PASSWORD" <<-'SQL'
                 -- create-if-absent WITHOUT a DO/$$ block: the $$ dollar-quote tag
                 -- does not survive this YAML-embedded heredoc (psql received a
                 -- mangled "DO $"). \gexec is robust — it executes the CREATE only
                 -- when the guard SELECT returns a row (i.e. the role is missing).
-                SELECT 'CREATE ROLE payload_app LOGIN'
-                 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'payload_app')\gexec
+                SELECT 'CREATE ROLE app_svc LOGIN'
+                 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_svc')\gexec
                 SELECT 'CREATE ROLE calcom_app LOGIN'
                  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'calcom_app')\gexec
                 -- re-assert LOGIN + password every run so a rotated Secret applies.
-                ALTER ROLE payload_app WITH LOGIN PASSWORD :'payload_pw';
+                ALTER ROLE app_svc WITH LOGIN PASSWORD :'app_svc_pw';
                 ALTER ROLE calcom_app  WITH LOGIN PASSWORD :'calcom_pw';
               SQL
 
@@ -107,36 +107,36 @@ spec:
               # CREATE DATABASE can't run in a transaction/DO block; \gexec emits it
               # only when missing. OWNER is set on create; re-asserted below.
               SUPER <<-'SQL'
-                SELECT 'CREATE DATABASE payload OWNER payload_app'
-                 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'payload')\gexec
+                SELECT 'CREATE DATABASE appdb OWNER app_svc'
+                 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'appdb')\gexec
                 SELECT 'CREATE DATABASE calcom OWNER calcom_app'
                  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'calcom')\gexec
               SQL
 
               echo "[init] re-asserting ownership + scoped, isolated grants..."
               SUPER <<-'SQL'
-                ALTER DATABASE payload OWNER TO payload_app;
+                ALTER DATABASE appdb OWNER TO app_svc;
                 ALTER DATABASE calcom  OWNER TO calcom_app;
 
                 -- only the owning role may connect to each db.
-                REVOKE CONNECT ON DATABASE payload FROM PUBLIC;
+                REVOKE CONNECT ON DATABASE appdb FROM PUBLIC;
                 REVOKE CONNECT ON DATABASE calcom  FROM PUBLIC;
-                REVOKE CONNECT ON DATABASE calcom  FROM payload_app;  -- isolation
-                REVOKE CONNECT ON DATABASE payload FROM calcom_app;   -- isolation
-                GRANT  CONNECT ON DATABASE payload TO payload_app;
+                REVOKE CONNECT ON DATABASE calcom  FROM app_svc;  -- isolation
+                REVOKE CONNECT ON DATABASE appdb FROM calcom_app;   -- isolation
+                GRANT  CONNECT ON DATABASE appdb TO app_svc;
                 GRANT  CONNECT ON DATABASE calcom  TO calcom_app;
               SQL
 
               # public-schema ownership inside each db -> full DDL for the app role
               # (Postgres 15+ no longer grants CREATE on public to PUBLIC), PLUS the
               # commonly-needed trusted extensions pre-created as superuser so app
-              # migrations (5.10/6.x) don't fail on CREATE EXTENSION.
+              # migrations (Spring/Flyway 20.2, Cal.com 6.x) don't fail on CREATE EXTENSION.
               echo "[init] ensuring public-schema ownership + extensions per db..."
               # NB: use psql -c flags, NOT a heredoc. An indented heredoc inside
               # this for-loop has a space-indented terminator, and <<- only strips
               # TABS — so the YAML-embedded heredoc runs to EOF ("unexpected end of
               # file"). -c flags sidestep the terminator problem entirely.
-              for pair in "payload:payload_app" "calcom:calcom_app"; do
+              for pair in "appdb:app_svc" "calcom:calcom_app"; do
                 db="${pair%%:*}"; owner="${pair##*:}"
                 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" \
                   -c "ALTER SCHEMA public OWNER TO ${owner};" \
@@ -146,7 +146,7 @@ spec:
                   -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
               done
 
-              echo "[init] done. payload/calcom DBs + roles + extensions ensured with isolation."
+              echo "[init] done. appdb/calcom DBs + roles + extensions ensured with isolation."
           resources:
             requests:
               cpu: 100m

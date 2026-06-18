@@ -2,6 +2,25 @@ spring:
   application:
     name: allpets-api
 
+  # appdb (owner role app_svc). Creds come from the k8s Secret at runtime — never here.
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/appdb}
+    username: ${SPRING_DATASOURCE_USERNAME:app_svc}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:5}   # single-replica clinic volume
+      pool-name: appdb-pool
+
+  jpa:
+    hibernate:
+      ddl-auto: validate          # schema is owned by Flyway, never Hibernate
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+
+  flyway:
+    enabled: true                 # versioned SQL under classpath:db/migration
+
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
@@ -19,6 +38,10 @@ management:
       probes:
         enabled: true          # /actuator/health/liveness + /actuator/health/readiness
       show-details: never      # no internals leaked on the public health endpoint
+      group:
+        readiness:
+          # Readiness flips UP only when appdb is reachable (LLD §4) — the rollout gate.
+          include: readinessState,db
   health:
     livenessstate:
       enabled: true
