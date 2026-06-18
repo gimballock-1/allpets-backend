@@ -41,7 +41,8 @@ dependencies {
     // migrations + JPA `validate` mapping end-to-end. CI's drift guard (15.4) uses
     // a separate throwaway Postgres service.
     testImplementation("io.zonky.test:embedded-postgres:2.1.0")
-    testImplementation(platform("io.zonky.test.postgres:embedded-postgres-binaries-bom:16.2.0"))
+    // Match the prod server minor (postgres:16.4) so test behaviour mirrors prod.
+    testImplementation(platform("io.zonky.test.postgres:embedded-postgres-binaries-bom:16.4.0"))
 }
 
 // Expose method parameter names (cleaner Spring binding / validation messages).

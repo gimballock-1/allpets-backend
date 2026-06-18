@@ -25,6 +25,8 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "contact_submissions")
 public class ContactSubmission {
 
+    // Hibernate assigns the UUID client-side; the schema's DEFAULT gen_random_uuid()
+    // is the fallback for any non-JPA insert (raw SQL, future tooling). Both are v4.
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false, updatable = false)
