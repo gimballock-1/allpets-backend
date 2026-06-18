@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: allpets-api
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  # Behind Traefik: trust forwarded headers so client IP / scheme are correct (14.x).
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Health + Prometheus scrape + build/version info. Nothing else exposed.
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true          # /actuator/health/liveness + /actuator/health/readiness
+      show-details: never      # no internals leaked on the public health endpoint
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  info:
+    env:
+      enabled: true            # surface the info.* block below
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# Build traceability — populated at deploy time (CD passes GIT_SHA / BUILD_TIME).
+info:
+  app:
+    name: ${spring.application.name}
+  git:
+    sha: ${GIT_SHA:dev}
+  build:
+    time: ${BUILD_TIME:unknown}
+
+logging:
+  level:
+    root: INFO
+    com.allpets.api: INFO

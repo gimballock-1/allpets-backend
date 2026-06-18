@@ -11,6 +11,25 @@ self-serve scheduler (phase 1). Deploys to the existing `quasar` k3s cluster.
 - **[Deployment runbook](planning/deployment.md)** — k3s base setup, DNS/TLS/ingress, database & object-storage ops.
 - ADRs: **[database decision](planning/database-decision.md)** (plain Postgres, no off-site backup) · **[admin-surface decision](planning/admin-surface-decision.md)** (app-auth-only).
 
+## Backend service (Spring Boot)
+
+The custom API is a Spring Boot service (Java 25, Gradle Kotlin DSL, Spring Boot 3.x)
+in `com.allpets.api`, structured domain-first (see `src/main/java/com/allpets/api/package-info.java`).
+
+```bash
+./gradlew build        # compile + test
+./gradlew bootRun      # run locally on :8080
+curl localhost:8080/actuator/health   # {"status":"UP",...}
+```
+
+- Health/metrics: `/actuator/health` (with `liveness` + `readiness` groups), `/actuator/info`
+  (build `GIT_SHA`/`BUILD_TIME`), `/actuator/prometheus`.
+- Config is env-overridable (`SERVER_PORT`, `GIT_SHA`, `BUILD_TIME`, …) — no secrets in source.
+- Container image: `deploy/Dockerfile.api` (multi-stage, non-root, `-XX:MaxRAMPercentage`).
+
+> Persistence (`appdb`/Flyway) lands in 20.2, the `POST /contact` endpoint in 20.3, and the
+> full developer/ops quickstart in 20.6.
+
 ## Deploy
 
 Cluster manifests live under `deploy/k8s/` and apply as one tree:
