@@ -8,7 +8,7 @@
 # `pg_restore -d <db> <file>.dump`.
 #
 # Auth model: connects PER-DB as the read-capable application roles
-# (payload_app -> payload, calcom_app -> calcom) created in 4.3. The app roles
+# (app_svc -> appdb, calcom_app -> calcom) created in 4.3. The app roles
 # own their DB so they can read everything in it — sufficient for a logical dump,
 # and avoids handing the backup job the superuser. Passwords come from the
 # existing `postgres-secret` (the 4.2/4.3 bootstrap Secret) via env — NO plaintext
@@ -144,11 +144,11 @@ spec:
                 # Read-capable application roles (4.3) — NOT the superuser.
                 # Passwords sourced from the existing bootstrap Secret; no
                 # plaintext in-repo. Keep these keys stable across 4.2/4.3/4.5.
-                - name: PAYLOAD_APP_PASSWORD
+                - name: APP_SVC_PASSWORD
                   valueFrom:
                     secretKeyRef:
                       name: postgres-secret
-                      key: PAYLOAD_APP_PASSWORD
+                      key: APP_SVC_PASSWORD
                 - name: CALCOM_APP_PASSWORD
                   valueFrom:
                     secretKeyRef:
@@ -188,7 +188,7 @@ spec:
                     echo "[$(date -u +%FT%TZ)] wrote ${out} ($(du -h "${out}" | cut -f1))"
                   }
 
-                  dump_one payload payload_app "${PAYLOAD_APP_PASSWORD}"
+                  dump_one appdb  app_svc     "${APP_SVC_PASSWORD}"
                   dump_one calcom  calcom_app  "${CALCOM_APP_PASSWORD}"
 
                   # Clean up any orphaned partials from a previously killed run.

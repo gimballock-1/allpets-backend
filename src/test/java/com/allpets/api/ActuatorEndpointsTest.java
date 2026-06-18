@@ -2,6 +2,7 @@ package com.allpets.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.allpets.api.support.PostgresIntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
@@ -21,7 +22,7 @@ import org.springframework.http.ResponseEntity;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureObservability
-class ActuatorEndpointsTest {
+class ActuatorEndpointsTest extends PostgresIntegrationTest {
 
     @Autowired
     private TestRestTemplate rest;

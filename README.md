@@ -26,8 +26,11 @@ curl localhost:8080/actuator/health   # {"status":"UP",...}
   (build `GIT_SHA`/`BUILD_TIME`), `/actuator/prometheus`.
 - Config is env-overridable (`SERVER_PORT`, `GIT_SHA`, `BUILD_TIME`, …) — no secrets in source.
 - Container image: `deploy/Dockerfile.api` (multi-stage, non-root, `-XX:MaxRAMPercentage`).
+- Persistence: Postgres `appdb` (owner role `app_svc`), schema owned by **Flyway**
+  (`src/main/resources/db/migration/`), Hibernate `ddl-auto=validate`. Tests run against a
+  real Postgres (no Docker) via embedded-postgres; CI adds a migration-drift guard (15.4).
 
-> Persistence (`appdb`/Flyway) lands in 20.2, the `POST /contact` endpoint in 20.3, and the
+> The `POST /contact` endpoint lands in 20.3, the api host + ingress in 20.4, and the
 > full developer/ops quickstart in 20.6.
 
 ## Deploy
