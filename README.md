@@ -29,9 +29,13 @@ curl localhost:8080/actuator/health   # {"status":"UP",...}
 - Persistence: Postgres `appdb` (owner role `app_svc`), schema owned by **Flyway**
   (`src/main/resources/db/migration/`), Hibernate `ddl-auto=validate`. Tests run against a
   real Postgres (no Docker) via embedded-postgres; CI adds a migration-drift guard (15.4).
+- Endpoints: `POST /contact` (public; bean-validated; honeypot + per-IP rate-limit hook;
+  persists a `ContactSubmission` then triggers a staff notification). Email (`EmailNotifier`)
+  and the rate limiter (`RateLimiter`) are ports with phase-1 stubs — Epic 13 / Epic 14
+  supply the real adapters. `GET /reviews` arrives in Epic 10.
 
-> The `POST /contact` endpoint lands in 20.3, the api host + ingress in 20.4, and the
-> full developer/ops quickstart in 20.6.
+> The api host + ingress + CORS land in 20.4, the k8s deploy in 20.5, and the full
+> developer/ops quickstart in 20.6.
 
 ## Deploy
 
