@@ -17,3 +17,10 @@ bin/
 # Local env / secrets (never commit real secrets — templates only)
 *.env
 .env
+
+# Materialized k8s Secrets — only the *.example.yaml templates are committed.
+# Real Secrets are created out-of-band (kubectl create secret, or /tmp + shred).
+deploy/k8s/**/*-secret.yaml
+deploy/k8s/**/*-token.yaml
+deploy/k8s/**/*-key.yaml
+!deploy/k8s/**/*.example.yaml
