@@ -46,7 +46,7 @@ The **Spring Boot backend process runs in `allpets-backend`** — alongside Cal.
 
 **`api.allpets.skpodduturi.dev` is a dedicated public host, not a path under the site.** The Spring API is served on its **own origin** (host `api.allpets.skpodduturi.dev`), with its **own Ingress + cert** in `allpets-backend`. The frontend never touches the data tier: the browser calls the site's own same-origin `/api` proxy (which server-side-fetches the Spring API cross-origin), and **only the Spring backend (and Cal.com / Plausible, all in `allpets-backend`) reaches Postgres/MinIO** — the one and only data path the deployed policy permits. An `allpets-frontend → allpets-database` allow is therefore **neither deployed nor needed**.
 
-### Hosts (all live, all A-records → `50.35.125.239`)
+### Hosts (A-records → `50.35.125.239`, to be created in Cloudflare)
 
 | Host | Serves | Ingress namespace | Process namespace |
 |---|---|---|---|
@@ -216,7 +216,7 @@ Deployed allows (these are the exact policies in `allpets-backend/deploy/k8s/net
 
 ### DNS — Cloudflare (`skpodduturi.dev`)
 
-`skpodduturi.dev` is a **user-owned Cloudflare DNS zone**, authoritative (registrar NS delegation points at Cloudflare's assigned nameservers). The four allpets hosts are **live A-records** (not CNAME), in **DNS-only / "gray-cloud" mode** (Cloudflare proxy **OFF**), TTL 300 (or "Auto"), all → **`50.35.125.239`** (quasar's WAN, effectively static — the home/office router statically forwards :80/:443 to Traefik):
+`skpodduturi.dev` is a **user-owned Cloudflare DNS zone**, authoritative (registrar NS delegation points at Cloudflare's assigned nameservers). The four allpets hosts are **A-records to be created** (not CNAME), in **DNS-only / "gray-cloud" mode** (Cloudflare proxy **OFF**), TTL 300 (or "Auto"), all → **`50.35.125.239`** (quasar's WAN, effectively static — the home/office router statically forwards :80/:443 to Traefik). As of the pivot they are **not yet created** (the zone returns NXDOMAIN); the zone + NS delegation are live, the records are added in the Cloudflare dashboard:
 
 | Host | Type | Target | TTL |
 |---|---|---|---|

@@ -46,8 +46,8 @@ net-new to cert-manager and was **not** part of the 2026-06-15 verification.
   cert-manager already owned the zone and certs issued with zero extra config.
   **DNS-01 means port-80 reachability is NOT required for issuance, and there is
   no ACME HTTP path to protect.**
-- **DNS**: `allpets`, `book.allpets`, `analytics.allpets`.skpodduturi.dev are all
-  live **A** records → `50.35.125.239`, managed in the **Cloudflare dashboard**
+- **DNS**: `allpets`, `book.allpets`, `analytics.allpets`.skpodduturi.dev are
+  **A** records **to be created** → `50.35.125.239`, managed in the **Cloudflare dashboard**
   (or via the Cloudflare API). Set them **DNS-only / "gray-cloud"** (proxy OFF) so
   Traefik + cert-manager + the 308 redirect behave exactly as before — Cloudflare
   is the DNS provider only, **not** a reverse proxy or Tunnel. Confirm each record

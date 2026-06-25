@@ -104,7 +104,9 @@ repoint). See `allpets-backend#131`.
 
 > **Owner:** 3.7 (this section). **Source of truth** for how an allpets public host
 > gets DNS, a cert, and an Ingress on `quasar`. Built on the **2026-06-15 verified
-> cluster + DNS facts**, which **override** the Epic-3 spec where they differ (the
+> cluster facts** (Traefik / middleware) plus the **post-pivot Cloudflare DNS/TLS
+> design** (the `skpodduturi.dev` zone is net-new — not part of that verification),
+> which **override** the Epic-3 spec where they differ (the
 > spec's HTTP-01 / port-80 assumption is stale — see §2.4). The canonical manifests
 > and the recorded redirect + admin-surface decisions live in
 > `deploy/k8s/ingress/README.md` (3.4 / 3.6), alongside
@@ -130,9 +132,12 @@ repoint). See `allpets-backend#131`.
 - **Zone:** `skpodduturi.dev`, PUBLIC, authoritative (registrar NS delegation points
   at the two Cloudflare-assigned nameservers shown on the zone's **Overview** page).
   Records are managed in the **Cloudflare dashboard** (or via the Cloudflare API).
-- **The allpets hosts are live**, type **A** (not CNAME), TTL **300**, **Proxy status:
-  DNS only (gray cloud)**, all → `50.35.125.239`, verified resolving from the
-  authoritative Cloudflare NS and from `1.1.1.1` / `8.8.8.8`:
+- **The allpets hosts must be created** as type **A** (not CNAME), TTL **300**,
+  **Proxy status: DNS only (gray cloud)**, all → `50.35.125.239`. As of the pivot
+  they are **NOT yet created** — the `skpodduturi.dev` zone returns **NXDOMAIN** for
+  these names (the zone + NS delegation are live, the records are not); add them in
+  the **Cloudflare dashboard**, then confirm each resolves from the authoritative
+  Cloudflare NS and from `1.1.1.1` / `8.8.8.8`:
 
   | host | type | target | TTL | proxy |
   |---|---|---|---|---|
