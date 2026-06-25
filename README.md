@@ -18,8 +18,8 @@ The custom API is a Spring Boot service (Java 25, Gradle Kotlin DSL, Spring Boot
 in `com.allpets.api`, structured domain-first (see `src/main/java/com/allpets/api/package-info.java`).
 
 ```bash
-./gradlew build        # compile + test
-./gradlew bootRun      # run locally on :8080
+./gradlew build        # compile + test (tests need no DB — embedded Postgres)
+./gradlew bootRun      # run locally on :8080 — needs a local Postgres + env; see the dev/ops guide
 curl localhost:8080/actuator/health   # {"status":"UP",...}
 ```
 

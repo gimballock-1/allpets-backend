@@ -113,6 +113,12 @@ To add a schema change:
 DB init (the cluster's `postgres-initdb-configmap`; locally, the bootstrap SQL above; in
 tests, `PostgresIntegrationTest`). Keep that contract: migrations assume the extensions exist.
 
+> **Test caveat:** the embedded-Postgres tests run Flyway as a **superuser**, whereas
+> production runs it as the non-superuser `app_svc`. A migration that needs elevated
+> privileges (e.g. `CREATE EXTENSION`, or altering objects `app_svc` doesn't own) would
+> **pass the tests but fail in prod** — keep every migration within `app_svc`'s grants (it
+> owns `appdb`). For anything needing a superuser, add it to the DB-init step, not a migration.
+
 ---
 
 ## Configuration & secrets
@@ -189,22 +195,45 @@ What's in the tree (relevant to this service):
 
 ### Live-cutover checklist (first bring-up)
 
-`kubectl apply -k` is necessary but **not sufficient** — these out-of-band steps make the
-service actually reachable and healthy:
+`kubectl apply -k` is necessary but **not sufficient** — and on a fresh cluster the
+namespaced Secrets must exist **before** the workloads start, so order matters.
+(Assumes cert-manager + Traefik are already installed on the cluster.)
 
-1. **DNS** — in Cloudflare, create the `skpodduturi.dev` **A-records** (`allpets`, `api.allpets`,
+1. **Namespaces first** — `apply -k` creates the allpets namespaces only at step 6, but the
+   app/DB Secrets below live in them, so create them up front:
+   ```bash
+   kubectl apply -f deploy/k8s/namespaces.yaml
+   ```
+2. **DNS** — in Cloudflare, create the `skpodduturi.dev` **A-records** (`allpets`, `api.allpets`,
    `book.allpets`, `analytics.allpets`) → `50.35.125.239`, **DNS-only / gray-cloud** (proxy OFF).
-2. **cert-manager token** — apply the real `cloudflare-api-token` Secret into the
-   `cert-manager` namespace (least-privilege: `Zone.DNS:Edit` + `Zone.Zone:Read` on
-   `skpodduturi.dev`).
-3. **App secret** — apply the real `allpets-api-secret` (the `app_svc` DB password) into
-   `allpets-backend`; ensure the DB's `postgres-secret` exists in `allpets-database`.
-4. **Image pull** — make sure CI has pushed the GHCR image, and apply the `ghcr-pull`
-   Secret (Epic 15.6) if the package is private.
-5. **Apply** — `kubectl apply -k deploy/k8s`.
-6. **One-time cleanup** — if an old `allow-from-frontend` policy is still live from an
-   earlier apply, remove it: `kubectl -n allpets-backend delete netpol allow-from-frontend`.
-7. **Verify** — see below.
+3. **cert-manager token** — create the real `cloudflare-api-token` in the `cert-manager`
+   namespace (least-privilege `Zone.DNS:Edit` + `Zone.Zone:Read` on `skpodduturi.dev`):
+   ```bash
+   kubectl -n cert-manager create secret generic cloudflare-api-token --from-literal=api-token='<TOKEN>'
+   ```
+4. **App + DB secrets** — the `app_svc` password (same value in both namespaces):
+   ```bash
+   kubectl -n allpets-backend create secret generic allpets-api-secret \
+     --from-literal=SPRING_DATASOURCE_PASSWORD='<app_svc password>'
+   # plus the DB's postgres-secret in allpets-database — see deploy/k8s/database/postgres-secret.example.yaml
+   ```
+5. **Image** — there is no CI yet (Epic 15.4 owns the GHCR build/push), and `deployment.yaml`
+   references `ghcr.io/gimballock-1/allpets-api:main`, so until CI lands, build and push it by
+   hand, then add the pull Secret **if the GHCR package is private**:
+   ```bash
+   docker build -f deploy/Dockerfile.api -t ghcr.io/gimballock-1/allpets-api:main .
+   echo "$GHCR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
+   docker push ghcr.io/gimballock-1/allpets-api:main
+   kubectl -n allpets-backend create secret docker-registry ghcr-pull \
+     --docker-server=ghcr.io --docker-username=<github-user> --docker-password="$GHCR_PAT"
+   ```
+   (Skip the `ghcr-pull` Secret if the package is public. **Never commit the PAT.**)
+6. **Apply** — `kubectl apply -k deploy/k8s`.
+7. **One-time cleanup** — drop the obsolete policy if an earlier apply left it behind:
+   ```bash
+   kubectl -n allpets-backend delete netpol allow-from-frontend --ignore-not-found
+   ```
+8. **Verify** — see below.
 
 ### Verify
 
@@ -212,10 +241,12 @@ service actually reachable and healthy:
 kubectl -n allpets-backend get deploy,pod -l app.kubernetes.io/name=allpets-api
 kubectl -n allpets-backend get certificate api-allpets-skpodduturi-dev-tls   # READY=True
 curl https://api.allpets.skpodduturi.dev/actuator/health                     # UP, valid cert (no -k)
-# CORS: allowed origin passes preflight, others are rejected
+# CORS: allowed origin passes preflight (echoes the origin + Content-Type), others rejected
 curl -si -X OPTIONS https://api.allpets.skpodduturi.dev/contact \
-  -H 'Origin: https://allpets.skpodduturi.dev' -H 'Access-Control-Request-Method: POST' \
-  | grep -i access-control-allow-origin
+  -H 'Origin: https://allpets.skpodduturi.dev' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: Content-Type' \
+  | grep -i access-control-allow
 ```
 
 ---
