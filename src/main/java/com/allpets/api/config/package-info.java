@@ -6,7 +6,7 @@
  * {@code application.yml} (Actuator health groups, Prometheus, info). Concrete
  * {@code @Configuration} classes land with their feature:
  * <ul>
- *   <li>CORS allowlist ({@code https://allpets.kinvee.in}, credentials off) — 20.4 / Epic 14.</li>
+ *   <li>CORS allowlist ({@code https://allpets.skpodduturi.dev}, credentials off) — {@code CorsConfig} (20.4).</li>
  *   <li>JPA / datasource / Flyway — 20.2.</li>
  *   <li>Mail (Spring Mail / JavaMailSender) — Epic 13.</li>
  *   <li>{@code @Scheduled} reviews refresh — Epic 10.</li>

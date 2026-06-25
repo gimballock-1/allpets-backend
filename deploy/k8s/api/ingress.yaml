@@ -1,0 +1,49 @@
+# allpets Spring backend — public host Ingress (issue 20.4)
+#
+# Realizes the canonical 3.4 per-host pattern (deploy/k8s/ingress/ingress-template.yaml,
+# deploy/k8s/ingress/README.md) for the Spring API host `api.allpets.skpodduturi.dev`:
+# traefik ingressClassName, dedicated `letsencrypt-cloudflare` DNS-01 issuer, the
+# `<host>-tls` secret, and the per-namespace `redirect-https` 308 Middleware.
+#
+# !!! NOT YET WIRED INTO deploy/k8s/kustomization.yaml !!!
+#   The backend Service (`allpets-api`) does not exist until 20.5. Applying this Ingress
+#   before the Service would give Traefik a dangling route (502/404). 20.5 adds the
+#   Deployment/Service under deploy/k8s/api/, then wires the whole api/ dir into the root
+#   kustomization with the `redirect-https` Middleware/Service ordered BEFORE this Ingress.
+#
+# APPLY-TIME dependencies (handled in 20.5 / the live cutover):
+#   - the `redirect-https` Middleware in ns allpets-backend
+#     (deploy/k8s/ingress/redirect-middleware.template.yaml).
+#   - the `letsencrypt-cloudflare` ClusterIssuer (deploy/k8s/cert-manager/) + the real
+#     `cloudflare-api-token` Secret + the `api.allpets.skpodduturi.dev` Cloudflare A-record.
+#
+# CORS is enforced in Spring (com.allpets.api.config.CorsConfig), NOT here.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: allpets-api-ingress
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-cloudflare
+    traefik.ingress.kubernetes.io/router.middlewares: allpets-backend-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [api.allpets.skpodduturi.dev]
+      secretName: api-allpets-skpodduturi-dev-tls
+  rules:
+    - host: api.allpets.skpodduturi.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: allpets-api      # 20.5: Spring Service (intended name; reconcile when authored)
+                port:
+                  number: 8080         # 20.5: Spring server.port. NOTE: allow-traefik-ingress
+                                       # (networkpolicies/backend-database.yaml) currently allows
+                                       # only 3000/8000 — 20.5 MUST add TCP 8080 or Traefik->pod is dropped.

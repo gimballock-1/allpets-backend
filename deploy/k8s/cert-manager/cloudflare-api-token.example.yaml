@@ -1,0 +1,33 @@
+# EXAMPLE — cert-manager Cloudflare DNS-01 API token (issue 20.4).
+# DO NOT COMMIT A REAL TOKEN. This file is a template only.
+#
+# Usage (out-of-band — the real token NEVER lands in this repo dir; same discipline
+# as database/*.example.yaml). ClusterIssuer secrets are read from the namespace
+# cert-manager runs in (--cluster-resource-namespace, default `cert-manager`).
+#   1. Mint a least-privilege Cloudflare API token: Zone.DNS:Edit + Zone.Zone:Read,
+#      scoped to the `skpodduturi.dev` zone.
+#   2. Create the Secret directly, with no file on disk (preferred — like minio-secret):
+#        kubectl -n cert-manager create secret generic cloudflare-api-token \
+#          --from-literal=api-token='<PASTE_TOKEN>'
+#      Or, if you prefer a file, write it to /tmp (NOT the repo) and shred it after
+#      (like postgres-secret): cp this template to /tmp/cloudflare-api-token.yaml,
+#      fill in stringData.api-token, then:
+#        kubectl -n cert-manager apply -f /tmp/cloudflare-api-token.yaml && shred -u /tmp/cloudflare-api-token.yaml
+#   Do NOT copy this to deploy/k8s/cert-manager/cloudflare-api-token.yaml — that path
+#   is .gitignored as a backstop, but the token still should not sit in the work tree.
+#
+# This token is REQUIRED for issuance — the inverse of the old Route53 setup where
+# cert-manager already owned the kinvee.in zone and certs issued with zero extra config.
+# The skpodduturi.dev Cloudflare zone is net-new to cert-manager.
+#
+# Intentionally NOT wired into kustomization.yaml (it carries a secret).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-token
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: allpets
+type: Opaque
+stringData:
+  api-token: "REPLACE_WITH_LEAST_PRIVILEGE_CLOUDFLARE_API_TOKEN"
