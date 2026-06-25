@@ -211,12 +211,19 @@ namespaced Secrets must exist **before** the workloads start, so order matters.
    ```bash
    kubectl -n cert-manager create secret generic cloudflare-api-token --from-literal=api-token='<TOKEN>'
    ```
-4. **App + DB secrets** — the `app_svc` password (same value in both namespaces):
-   ```bash
-   kubectl -n allpets-backend create secret generic allpets-api-secret \
-     --from-literal=SPRING_DATASOURCE_PASSWORD='<app_svc password>'
-   # plus the DB's postgres-secret in allpets-database — see deploy/k8s/database/postgres-secret.example.yaml
-   ```
+4. **Secrets** — `apply -k` includes the database substrate, so **all three** must exist
+   first or the Postgres / MinIO / API pods fail to start on a fresh cluster:
+   - **`allpets-api-secret`** (`allpets-backend`) — the app's `app_svc` DB password:
+     ```bash
+     kubectl -n allpets-backend create secret generic allpets-api-secret \
+       --from-literal=SPRING_DATASOURCE_PASSWORD='<app_svc password>'
+     ```
+   - **`postgres-secret`** (`allpets-database`) — superuser + app-role passwords; create it
+     from `deploy/k8s/database/postgres-secret.example.yaml`. Its `APP_SVC_PASSWORD` **must
+     equal** the `SPRING_DATASOURCE_PASSWORD` above.
+   - **`minio-root-secret`** (`allpets-database`) — MinIO root creds; create it per
+     `deploy/k8s/database/minio-secret.example.yaml`. (`minio-payload-key` is only needed by
+     the MinIO setup Job, which the root `apply -k` does not run.)
 5. **Image** — there is no CI yet (Epic 15.4 owns the GHCR build/push), and `deployment.yaml`
    references `ghcr.io/gimballock-1/allpets-api:main`, so until CI lands, build and push it by
    hand, then add the pull Secret **if the GHCR package is private**:
@@ -273,7 +280,7 @@ curl -si -X OPTIONS https://api.allpets.skpodduturi.dev/contact \
 | Boot fails: Flyway `checksum mismatch` | An already-applied migration file was edited | Revert the edit; make changes in a new `V<n>` |
 | Boot fails: `function gen_random_uuid() does not exist` / `type "citext"` | Extensions not pre-created in that DB | `CREATE EXTENSION pgcrypto; CREATE EXTENSION citext;` as a superuser |
 | Pod **Running** but never **Ready** | readiness gates on `db`; appdb unreachable / bad password | Check `allpets-api-secret`, the DSN, and that Postgres is up + reachable (netpol `allow-from-backend`) |
-| `ImagePullBackOff` | image not pushed yet, or private package without a pull secret | Confirm CI pushed the tag; apply the `ghcr-pull` Secret (15.6) |
+| `ImagePullBackOff` | image not pushed yet, or private package without a pull secret | Confirm the manual push (or CI, once 15.4 lands) pushed the tag; create the `ghcr-pull` Secret if the package is private |
 | `OOMKilled` at startup/under load | heap + non-heap exceeds the memory limit | The Deployment caps heap at 60% of the 1.5Gi limit (`JAVA_OPTS`); raise the limit or lower the % |
 | Browser CORS error from the site | origin not in the allowlist | Set `ALLPETS_CORS_ALLOWED_ORIGINS` to include the calling origin |
 | `certificate … not Ready` | Cloudflare token missing/invalid, or the A-record/zone not set | Check the `cloudflare-api-token` Secret + `kubectl -n allpets-backend describe certificate …`/`order`/`challenge` |
