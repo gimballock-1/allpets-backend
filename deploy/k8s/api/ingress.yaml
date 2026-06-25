@@ -12,7 +12,7 @@
 #
 # LIVE-CUTOVER dependencies (NOT satisfied by `kubectl apply -k` alone):
 #   - the `letsencrypt-cloudflare` ClusterIssuer (deploy/k8s/cert-manager/) + the real
-#     `cloudflare-api-token` Secret + the `api.allpets.skpodduturi.dev` Cloudflare A-record.
+#     `cloudflare-api-token-secret` Secret + the `api.allpets.skpodduturi.dev` Cloudflare A-record.
 #   - the real `allpets-api-secret` (app_svc DB password) for the pod to start ready.
 #   - the GHCR image (CI 15.4) + the `ghcr-pull` Secret (15.6) if the package is private.
 #

@@ -23,7 +23,7 @@ with one deliberate improvement (a firm HTTP→HTTPS redirect — see below).
 The **Traefik / cluster** facts below were verified against the live cluster on
 **2026-06-15** and **override the Epic-3 spec**, which predates the verification
 and wrongly assumes HTTP-01. The **DNS / TLS** facts (Cloudflare zone, the
-dedicated `letsencrypt-cloudflare` issuer, the `cloudflare-api-token` secret) are
+dedicated `letsencrypt-cloudflare` issuer, the `cloudflare-api-token-secret` secret) are
 **post-pivot design to be stood up** — the `skpodduturi.dev` Cloudflare zone is
 net-new to cert-manager and was **not** part of the 2026-06-15 verification.
 
@@ -40,7 +40,7 @@ net-new to cert-manager and was **not** part of the 2026-06-15 verification.
   editing the shared cluster-wide `letsencrypt-prod` issuer (which also serves
   the aarogya healthcare-prod tenant and `ai.kinvee.in`). The Cloudflare zone is
   **net-new to cert-manager** — there is no pre-existing write access to inherit —
-  so issuance needs the new solver **plus** a k8s secret `cloudflare-api-token`
+  so issuance needs the new solver **plus** a k8s secret `cloudflare-api-token-secret`
   (a least-privilege API token: `Zone.DNS:Edit` + `Zone.Zone:Read` on
   `skpodduturi.dev`). This is the **inverse** of the old Route53 setup, where
   cert-manager already owned the zone and certs issued with zero extra config.
@@ -240,7 +240,7 @@ Once a workload's Service is live and its Ingress is applied, verify per host:
 2. `kubectl -n <ns> get certificate <host>-tls -w` until `READY=True`. With
    DNS-01 there is **no** HTTP challenge; if stuck, check
    `kubectl -n <ns> get order,challenge` and that the Cloudflare TXT record was
-   written (and that the `cloudflare-api-token` secret is valid). (No port-80
+   written (and that the `cloudflare-api-token-secret` secret is valid). (No port-80
    troubleshooting applies here.)
 3. Confirm prod issuer (not staging):
    `kubectl get clusterissuer letsencrypt-cloudflare -o jsonpath='{.spec.acme.server}'`
