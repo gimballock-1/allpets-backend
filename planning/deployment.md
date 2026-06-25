@@ -33,7 +33,7 @@
 - cert-manager + cainjector + webhook healthy.
 - **Existing shared ClusterIssuer `letsencrypt-prod`** Ready — ACME **production**
   (`acme-v02.api.letsencrypt.org`), email `skrx7392@gmail.com`, **DNS-01 via AWS Route 53** for the `kinvee.in` zone. It also serves the **co-tenants** (`aarogya` healthcare-prod, `ai.kinvee.in`) and is **left untouched** — do **not** edit it for allpets.
-- **NET-NEW for allpets:** allpets now lives on `skpodduturi.dev`, a **Cloudflare** zone that cert-manager does **not** yet control, so allpets gets its **own dedicated ClusterIssuer `letsencrypt-cloudflare`** — ACME **production** (same directory + email), **DNS-01 via the Cloudflare solver** (API token in the k8s secret `cloudflare-api-token-secret`, least-privilege Zone.DNS:Edit + Zone.Zone:Read on `skpodduturi.dev` — **not** HTTP-01). Epic-3 Ingress annotation:
+- **NET-NEW for allpets:** allpets now lives on `skpodduturi.dev`, a **Cloudflare** zone that cert-manager does **not** yet control, so allpets gets its **own dedicated ClusterIssuer `letsencrypt-cloudflare`** — ACME **production** (same Let's Encrypt directory; email `saikrishnareddy7392@gmail.com`), **DNS-01 via the Cloudflare solver** (API token in the k8s secret `cloudflare-api-token-secret`, least-privilege Zone.DNS:Edit + Zone.Zone:Read on `skpodduturi.dev` — **not** HTTP-01). Epic-3 Ingress annotation:
   `cert-manager.io/cluster-issuer: letsencrypt-cloudflare`.
 
 ### 1.4 Namespaces (2.5)
