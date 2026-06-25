@@ -47,7 +47,7 @@ metadata:
     app.kubernetes.io/name: minio
     app.kubernetes.io/component: setup
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   backoffLimit: 6            # retry while MinIO finishes coming up
   ttlSecondsAfterFinished: 86400   # auto-clean the completed Job after a day
@@ -57,7 +57,7 @@ spec:
         app.kubernetes.io/name: minio
         app.kubernetes.io/component: setup    # NetworkPolicy `from` selector targets this
         app.kubernetes.io/part-of: allpets    # NetworkPolicy label contract
-        allpets.kinvee.in/tier: database
+        allpets.skpodduturi.dev/tier: database
     spec:
       restartPolicy: OnFailure
       securityContext:

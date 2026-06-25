@@ -20,7 +20,7 @@ metadata:
   name: allpets-backend
   labels:
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: backend
+    allpets.skpodduturi.dev/tier: backend
 ---
 apiVersion: v1
 kind: Namespace
@@ -28,7 +28,7 @@ metadata:
   name: allpets-database
   labels:
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 ---
 apiVersion: v1
 kind: Namespace
@@ -36,4 +36,4 @@ metadata:
   name: allpets-observability
   labels:
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: observability
+    allpets.skpodduturi.dev/tier: observability

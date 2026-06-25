@@ -8,12 +8,12 @@
 > - Deploy/ops runbook → [`planning/deployment.md`](./deployment.md)
 > - Data-tier decision (plain Postgres, no off-site) → [`planning/database-decision.md`](./database-decision.md) (ADR 4.1)
 > - Admin-surface decision (app-auth-only) → [`planning/admin-surface-decision.md`](./admin-surface-decision.md) (ADR 3.6)
-> - Ingress pattern (Route 53 + Traefik + cert-manager DNS-01) → [`deploy/k8s/ingress/README.md`](../deploy/k8s/ingress/README.md) (3.4)
+> - Ingress pattern (Cloudflare + Traefik + cert-manager DNS-01) → [`deploy/k8s/ingress/README.md`](../deploy/k8s/ingress/README.md) (3.4)
 > - Requirements → [`planning/requirements.md`](../../planning/requirements.md)
 >
-> **The 2026-06-17 pivot in one paragraph:** Payload CMS is **dropped entirely**. Marketing content is now **file-based** (typed / MDX content files committed in the `allpets-frontend` repo) — set-and-forget, edited by the operator via Git commit + auto-deploy. The small custom server work (contact-form, Google-reviews cache, transactional email) moves to a **new Spring Boot backend service** in `allpets-backend`, exposed on its **own host** `api.allpets.kinvee.in` and reached by the Next.js site's **server-side `/api` proxy** **cross-origin** (the browser stays same-origin). That Spring service is also the **seed of the phase-2 application** (pet/patient profiles + multi-branch multi-tenancy), though none of phase 2 is built yet.
+> **The 2026-06-17 pivot in one paragraph:** Payload CMS is **dropped entirely**. Marketing content is now **file-based** (typed / MDX content files committed in the `allpets-frontend` repo) — set-and-forget, edited by the operator via Git commit + auto-deploy. The small custom server work (contact-form, Google-reviews cache, transactional email) moves to a **new Spring Boot backend service** in `allpets-backend`, exposed on its **own host** `api.allpets.skpodduturi.dev` and reached by the Next.js site's **server-side `/api` proxy** **cross-origin** (the browser stays same-origin). That Spring service is also the **seed of the phase-2 application** (pet/patient profiles + multi-branch multi-tenancy), though none of phase 2 is built yet.
 >
-> **What is NOT used (recorded so a reviewer grepping these terms finds only explicit disclaimers):** **No headless CMS / Payload** — marketing content is **file-based** (typed / MDX in `allpets-frontend`), not authored through a CMS or stored in a content database. **Cloudflare** is not used (no Cloudflare proxy, no Tunnel, no Cloudflare Access — hosts are plain A-records → quasar WAN). **HTTP-01** is not used (cert solver is **DNS-01** via Route 53; the Epic-3 spec's HTTP-01/port-80 assumption is **superseded**). **CloudNativePG / CNPG** is not used (Postgres is a plain `Deployment` — ADR 4.1). **sealed-secrets / SOPS / external-secrets** are not used in phase 1 (GitHub repo secrets → k8s Secrets at deploy; sealing is **phase-2** hardening). **GitOps** (Flux/Argo + a manifests repo) is not used (CD is **push-based** over Tailscale; GitOps is a phase-2 candidate). A **dedicated clinic server** is not phase-1 (deploy target is the existing `quasar`; the dedicated box is the deferred **phase-2 migration**, Epic 1).
+> **What is NOT used (recorded so a reviewer grepping these terms finds only explicit disclaimers):** **No headless CMS / Payload** — marketing content is **file-based** (typed / MDX in `allpets-frontend`), not authored through a CMS or stored in a content database. **Cloudflare** is now the **DNS provider** (it manages the `skpodduturi.dev` zone) but only in **DNS-only ("gray-cloud") mode** — it is **not** a reverse proxy, **not** a Tunnel, and **not** Cloudflare Access (hosts are plain A-records → quasar WAN; "Cloudflare-as-DNS" is **not** "Cloudflare-Access/Tunnel"). **HTTP-01** is not used (cert solver is **DNS-01** via the **Cloudflare** solver; the Epic-3 spec's HTTP-01/port-80 assumption is **superseded**). **CloudNativePG / CNPG** is not used (Postgres is a plain `Deployment` — ADR 4.1). **sealed-secrets / SOPS / external-secrets** are not used in phase 1 (GitHub repo secrets → k8s Secrets at deploy; sealing is **phase-2** hardening). **GitOps** (Flux/Argo + a manifests repo) is not used (CD is **push-based** over Tailscale; GitOps is a phase-2 candidate). A **dedicated clinic server** is not phase-1 (deploy target is the existing `quasar`; the dedicated box is the deferred **phase-2 migration**, Epic 1).
 
 ---
 
@@ -28,7 +28,7 @@ allpets is the phase-1 website + self-serve appointment scheduler for **All Pets
 
 > **No CMS.** There is **no Payload CMS, no content database, and no content admin UI**. Marketing content is set-and-forget: the operator edits typed / MDX files in `allpets-frontend` and a Git commit auto-deploys the site. This replaces the former Payload-authoring model end to end.
 
-Everything runs as containers on an **existing single-node k3s cluster on `quasar`**, co-tenant with other production workloads (notably **aarogya**, a healthcare prod stack, and **local-ai**). The architecture is deliberately **container-friendly and vendor-neutral**: no managed cloud database, no cloud load balancer, no cloud-only primitive on the request path. The only external clouds in play are **AWS Route 53** (DNS + the ACME DNS-01 solver), **Let's Encrypt** (certificate authority), and **GitHub / GHCR** (CI + image registry) — none of which sit on the live request path.
+Everything runs as containers on an **existing single-node k3s cluster on `quasar`**, co-tenant with other production workloads (notably **aarogya**, a healthcare prod stack, and **local-ai**). The architecture is deliberately **container-friendly and vendor-neutral**: no managed cloud database, no cloud load balancer, no cloud-only primitive on the request path. The only external clouds in play are **Cloudflare** (DNS + the ACME DNS-01 solver, in DNS-only / gray-cloud mode), **Let's Encrypt** (certificate authority), and **GitHub / GHCR** (CI + image registry) — none of which sit on the live request path.
 
 The system is built around three load-bearing structural ideas, each detailed below:
 
@@ -41,21 +41,21 @@ The system is built around three load-bearing structural ideas, each detailed be
 The **Spring Boot backend process runs in `allpets-backend`** — alongside Cal.com and Plausible — and it is **the Spring service (in `allpets-backend`)** that connects to the `appdb` database and to MinIO. This matches the deployed substrate:
 
 - `deploy/k8s/networkpolicies/backend-database.yaml` opens the data tier **only** to `allpets-backend` (`allow-from-backend`: namespaceSelector `allpets-backend` → Postgres 5432 / MinIO 9000 / ClickHouse 8123). There is **no `allow-from-frontend` policy on `allpets-database`**, and the frontend repo's only NetworkPolicy (`allpets-frontend/deploy/k8s/networkpolicy.yaml`) makes **no reference to `allpets-database`**.
-- The Next.js site does **not** call the Spring backend over the in-cluster `allow-from-frontend` path. The pivot makes the API a **first-class public host** (`api.allpets.kinvee.in`); the **browser stays same-origin** — it calls a **Next.js route-handler proxy** (`/api/contact`, `/api/reviews` on `allpets.kinvee.in`) whose **server-side** fetch reaches the Spring host **cross-origin** over the public-ingress plane (CORS allowlisted for `https://allpets.kinvee.in`). The old `/admin` passthrough and the in-cluster content-API seam are **gone**; the same-origin `/api` proxy is **retained and re-targeted** from Payload to Spring (Frontend LLD §4.2).
+- The Next.js site does **not** call the Spring backend over the in-cluster `allow-from-frontend` path. The pivot makes the API a **first-class public host** (`api.allpets.skpodduturi.dev`); the **browser stays same-origin** — it calls a **Next.js route-handler proxy** (`/api/contact`, `/api/reviews` on `allpets.skpodduturi.dev`) whose **server-side** fetch reaches the Spring host **cross-origin** over the public-ingress plane (CORS allowlisted for `https://allpets.skpodduturi.dev`). The old `/admin` passthrough and the in-cluster content-API seam are **gone**; the same-origin `/api` proxy is **retained and re-targeted** from Payload to Spring (Frontend LLD §4.2).
 - `deployment.md` §1.4 lists the **Spring backend** under `allpets-backend`, and its restore/rotation runbook drives it as `kubectl -n allpets-backend … deploy/allpets-api`.
 
-**`api.allpets.kinvee.in` is a dedicated public host, not a path under the site.** The Spring API is served on its **own origin** (host `api.allpets.kinvee.in`), with its **own Ingress + cert** in `allpets-backend`. The frontend never touches the data tier: the browser calls the site's own same-origin `/api` proxy (which server-side-fetches the Spring API cross-origin), and **only the Spring backend (and Cal.com / Plausible, all in `allpets-backend`) reaches Postgres/MinIO** — the one and only data path the deployed policy permits. An `allpets-frontend → allpets-database` allow is therefore **neither deployed nor needed**.
+**`api.allpets.skpodduturi.dev` is a dedicated public host, not a path under the site.** The Spring API is served on its **own origin** (host `api.allpets.skpodduturi.dev`), with its **own Ingress + cert** in `allpets-backend`. The frontend never touches the data tier: the browser calls the site's own same-origin `/api` proxy (which server-side-fetches the Spring API cross-origin), and **only the Spring backend (and Cal.com / Plausible, all in `allpets-backend`) reaches Postgres/MinIO** — the one and only data path the deployed policy permits. An `allpets-frontend → allpets-database` allow is therefore **neither deployed nor needed**.
 
 ### Hosts (all live, all A-records → `50.35.125.239`)
 
 | Host | Serves | Ingress namespace | Process namespace |
 |---|---|---|---|
-| `allpets.kinvee.in` | Next.js marketing site (file-based content) | `allpets-frontend` (Ingress for the site) | `allpets-frontend` |
-| `api.allpets.kinvee.in` | Spring Boot backend API (contact-form, reviews cache, email, actuator) | `allpets-backend` (Ingress + cert + CORS allowlist) | `allpets-backend` |
-| `book.allpets.kinvee.in` | Cal.com self-hosted (booking + Cal.com admin) | `allpets-backend` | `allpets-backend` |
-| `analytics.allpets.kinvee.in` | Plausible CE dashboard + tracking endpoint | `allpets-backend` | `allpets-backend` |
+| `allpets.skpodduturi.dev` | Next.js marketing site (file-based content) | `allpets-frontend` (Ingress for the site) | `allpets-frontend` |
+| `api.allpets.skpodduturi.dev` | Spring Boot backend API (contact-form, reviews cache, email, actuator) | `allpets-backend` (Ingress + cert + CORS allowlist) | `allpets-backend` |
+| `book.allpets.skpodduturi.dev` | Cal.com self-hosted (booking + Cal.com admin) | `allpets-backend` | `allpets-backend` |
+| `analytics.allpets.skpodduturi.dev` | Plausible CE dashboard + tracking endpoint | `allpets-backend` | `allpets-backend` |
 
-The Next.js site reaches the Spring API through a **same-origin route-handler proxy** (`/api/*` on `allpets.kinvee.in`) whose **server-side** fetch calls `https://api.allpets.kinvee.in` **cross-origin**; the API's CORS allowlist permits only `https://allpets.kinvee.in` (the proxy's server-side origin). The browser itself never calls the API host directly. Cal.com keeps its **own dedicated host** (never a path under `allpets`) because it needs a stable host for cookies and Google OAuth callbacks (req §9); the Spring API gets its own host for the same reason — clean origin boundary, independent cert, simple CORS.
+The Next.js site reaches the Spring API through a **same-origin route-handler proxy** (`/api/*` on `allpets.skpodduturi.dev`) whose **server-side** fetch calls `https://api.allpets.skpodduturi.dev` **cross-origin**; the API's CORS allowlist permits only `https://allpets.skpodduturi.dev` (the proxy's server-side origin). The browser itself never calls the API host directly. Cal.com keeps its **own dedicated host** (never a path under `allpets`) because it needs a stable host for cookies and Google OAuth callbacks (req §9); the Spring API gets its own host for the same reason — clean origin boundary, independent cert, simple CORS.
 
 ---
 
@@ -68,14 +68,14 @@ flowchart TB
         le["Let's Encrypt ACME (production)"]
     end
 
-    subgraph aws["AWS Route 53 — zone kinvee.in"]
+    subgraph cf["Cloudflare — zone skpodduturi.dev (DNS-only)"]
         dns["A: allpets / api.allpets / book.allpets / analytics.allpets<br/>to 50.35.125.239 (TTL 300)"]
         txt["_acme-challenge TXT (DNS-01 solver writes here)"]
     end
 
     subgraph quasar["quasar — single-node k3s (co-tenant: aarogya, local-ai)"]
         traefik["Traefik ingress<br/>:80 to 308 to :443"]
-        certmgr["cert-manager<br/>ClusterIssuer letsencrypt-prod (DNS-01)"]
+        certmgr["cert-manager<br/>ClusterIssuer letsencrypt-cloudflare (DNS-01)"]
 
         subgraph nsfe["ns allpets-frontend"]
             site["Next.js marketing site<br/>(:3000) — file-based content"]
@@ -111,12 +111,12 @@ flowchart TB
     certmgr -.->|"writes challenge"| txt
     certmgr -.->|"issues cert into host-tls Secret"| traefik
 
-    traefik -->|"allpets.kinvee.in (site)"| site
-    traefik -->|"api.allpets.kinvee.in"| api
-    traefik -->|"book.allpets.kinvee.in"| calcom
-    traefik -->|"analytics.allpets.kinvee.in"| plausible
+    traefik -->|"allpets.skpodduturi.dev (site)"| site
+    traefik -->|"api.allpets.skpodduturi.dev"| api
+    traefik -->|"book.allpets.skpodduturi.dev"| calcom
+    traefik -->|"analytics.allpets.skpodduturi.dev"| plausible
 
-    site -->|"server-side /api proxy → api.allpets.kinvee.in (cross-origin, CORS)"| traefik
+    site -->|"server-side /api proxy → api.allpets.skpodduturi.dev (cross-origin, CORS)"| traefik
     api -->|"appdb :5432"| pg
     api -->|"media :9000"| minio
     calcom -->|"calcom DB :5432"| pg
@@ -133,7 +133,7 @@ flowchart TB
     ssh -.->|"kubectl apply"| quasar
 ```
 
-> Solid arrows are the **live request/data path**; dashed arrows are **control-plane / out-of-band** (cert issuance, observability scrape, deploy). **Note the data-tier paths:** Postgres/MinIO/ClickHouse are reached **only from `allpets-backend`** (Spring backend, Cal.com, Plausible) — this is the only ingress the deployed `allow-from-backend` policy permits. The Next.js site (in `allpets-frontend`) never touches the data tier; it ships **file-based content** in its own image; its **server-side `/api` proxy** calls the **Spring API cross-origin** over the public host `api.allpets.kinvee.in` (the browser stays same-origin). The Spring backend owns all `appdb` + MinIO access. The deploy plane (Tailscale) and the public-ingress plane (Traefik :80/:443) are deliberately separate — see §7.
+> Solid arrows are the **live request/data path**; dashed arrows are **control-plane / out-of-band** (cert issuance, observability scrape, deploy). **Note the data-tier paths:** Postgres/MinIO/ClickHouse are reached **only from `allpets-backend`** (Spring backend, Cal.com, Plausible) — this is the only ingress the deployed `allow-from-backend` policy permits. The Next.js site (in `allpets-frontend`) never touches the data tier; it ships **file-based content** in its own image; its **server-side `/api` proxy** calls the **Spring API cross-origin** over the public host `api.allpets.skpodduturi.dev` (the browser stays same-origin). The Spring backend owns all `appdb` + MinIO access. The deploy plane (Tailscale) and the public-ingress plane (Traefik :80/:443) are deliberately separate — see §7.
 
 ---
 
@@ -141,16 +141,16 @@ flowchart TB
 
 | Component | Role | Host / endpoint | Namespace | Notes |
 |---|---|---|---|---|
-| **Next.js marketing site** | Public site (Home, Services, About, Contact, legal). App Router, SSR/SSG, Cal.com embed on `/book` and service CTAs. **Marketing content is file-based** (typed / MDX files committed in `allpets-frontend`). | `allpets.kinvee.in` :3000 | `allpets-frontend` | Content ships **inside the site image** (no content API, no CMS). A **same-origin `/api` route-handler proxy** server-side-fetches the **Spring API** at `api.allpets.kinvee.in` (cross-origin) for contact-form POST + reviews; the browser stays same-origin and **does not** touch Postgres/MinIO directly. |
-| **Spring Boot backend** | Custom backend glue: **contact-form** (persist + trigger email), **Google-reviews cache** (scheduled fetch + serve), **transactional email**, **health/actuator**. **Seed of the phase-2 app** (pet profiles + multi-tenancy — §11). Build = **Gradle**; **Java 25 LTS**, latest **Spring Boot 3.x**; **Spring Data JPA + Flyway** migrations; multi-stage **Docker** image → **GHCR**. | `api.allpets.kinvee.in` :8080 | `allpets-backend` | Owns the `appdb` DB (role `app_svc`) + MinIO `allpets-media`, and is the **only** allpets workload that connects to them. Own Ingress + cert (`api-allpets-kinvee-in-tls`); **CORS allowlist** = `https://allpets.kinvee.in`. App-auth-only when admin/auth surfaces arrive (3.6); phase-1 contact/reviews endpoints are public POST/GET, rate-limited. |
-| **Cal.com self-hosted** | Booking flow, vet schedules, intake forms, Google Calendar sync, confirmation/reminder email, cancel/reschedule. **No EE** (Cal.diy / Cal.com main without Enterprise). | `book.allpets.kinvee.in` :3000 | `allpets-backend` | Owns the `calcom` DB. Dedicated host for cookies/OAuth. |
-| **Plausible CE** | Cookieless, no-PII site analytics + dashboard + tracking script. | `analytics.allpets.kinvee.in` :8000 | `allpets-backend` | Uses its own Postgres metadata (in the shared server) **and** ClickHouse for events. |
+| **Next.js marketing site** | Public site (Home, Services, About, Contact, legal). App Router, SSR/SSG, Cal.com embed on `/book` and service CTAs. **Marketing content is file-based** (typed / MDX files committed in `allpets-frontend`). | `allpets.skpodduturi.dev` :3000 | `allpets-frontend` | Content ships **inside the site image** (no content API, no CMS). A **same-origin `/api` route-handler proxy** server-side-fetches the **Spring API** at `api.allpets.skpodduturi.dev` (cross-origin) for contact-form POST + reviews; the browser stays same-origin and **does not** touch Postgres/MinIO directly. |
+| **Spring Boot backend** | Custom backend glue: **contact-form** (persist + trigger email), **Google-reviews cache** (scheduled fetch + serve), **transactional email**, **health/actuator**. **Seed of the phase-2 app** (pet profiles + multi-tenancy — §11). Build = **Gradle**; **Java 25 LTS**, latest **Spring Boot 3.x**; **Spring Data JPA + Flyway** migrations; multi-stage **Docker** image → **GHCR**. | `api.allpets.skpodduturi.dev` :8080 | `allpets-backend` | Owns the `appdb` DB (role `app_svc`) + MinIO `allpets-media`, and is the **only** allpets workload that connects to them. Own Ingress + cert (`api-allpets-skpodduturi-dev-tls`); **CORS allowlist** = `https://allpets.skpodduturi.dev`. App-auth-only when admin/auth surfaces arrive (3.6); phase-1 contact/reviews endpoints are public POST/GET, rate-limited. |
+| **Cal.com self-hosted** | Booking flow, vet schedules, intake forms, Google Calendar sync, confirmation/reminder email, cancel/reschedule. **No EE** (Cal.diy / Cal.com main without Enterprise). | `book.allpets.skpodduturi.dev` :3000 | `allpets-backend` | Owns the `calcom` DB. Dedicated host for cookies/OAuth. |
+| **Plausible CE** | Cookieless, no-PII site analytics + dashboard + tracking script. | `analytics.allpets.skpodduturi.dev` :8000 | `allpets-backend` | Uses its own Postgres metadata (in the shared server) **and** ClickHouse for events. |
 | **Postgres 16.x** | One server hosting **two isolated logical databases**: `appdb` and `calcom` (+ Plausible metadata). Plain `Deployment` + PVC + `Service` (not CNPG). | `postgres.allpets-database.svc.cluster.local:5432` | `allpets-database` | Roles `app_svc` / `calcom_app`; cross-DB `CONNECT` revoked. **Ingress allowed only from `allpets-backend`** (§5). See §4. |
 | **MinIO** | S3-compatible object store. Phase 1: any site/API media. **Future home for pet-profile photos/documents** (phase 2). Standalone `StatefulSet`. | `http://minio.allpets-database.svc.cluster.local:9000` | `allpets-database` | Bucket `allpets-media` is **private**; the Spring backend uses a **scoped** key, not root; `forcePathStyle: true`. Console :9001 is **not** publicly exposed. Reached only by the Spring backend (from `allpets-backend`). |
 | **ClickHouse** | Plausible's event/analytics store (columnar). | :8123 (in-cluster) | `allpets-database` | Backup is the **11.6** seam (port 8123), out of Epic-4 scope. Reached only from `allpets-backend` (Plausible). |
 | **pg_dump CronJob** | Nightly logical backup of `appdb` + `calcom` to a **local PVC** (14-day retention). Runs **inside** `allpets-database`. | n/a (`pgdump-pvc`) | `allpets-database` | **No off-site** copy — Backblaze dropped (ADR 4.1). RPO ≈ 24h, no PITR. Reaches Postgres via the intra-namespace allow (§5). |
 | **Traefik** (k3s default) | Cluster ingress; TLS termination; HTTP→HTTPS 308 redirect. | :80 / :443 (WAN `50.35.125.239`) | `kube-system` (shared) | `IngressClass traefik`; `allowCrossNamespace` OFF (redirect Middleware is per-namespace). |
-| **cert-manager** | Issues + auto-renews Let's Encrypt certs via the `letsencrypt-prod` ClusterIssuer, **DNS-01 solver**. | n/a | `cert-manager` (shared) | Writes `_acme-challenge` TXT into the Route 53 `kinvee.in` zone. |
+| **cert-manager** | Issues + auto-renews Let's Encrypt certs via a dedicated `letsencrypt-cloudflare` ClusterIssuer, **DNS-01 solver (Cloudflare)**. | n/a | `cert-manager` (shared) | Writes `_acme-challenge` TXT into the Cloudflare `skpodduturi.dev` zone, authenticated by the `cloudflare-api-token` secret. |
 | **Shared observability** | Grafana + Prometheus + Loki + Alloy (+ kube-state-metrics, node-exporter). **Reused**, not re-deployed. | n/a | `observability` (shared) | allpets logs auto-ship; metrics via kube-state-metrics + a scrape addition. See §10. |
 
 ---
@@ -185,7 +185,7 @@ Workloads are split across **three** allpets namespaces (plus a reserved `allpet
 | `allpets-database` | Postgres, MinIO, ClickHouse, nightly `pg_dump` CronJob |
 | `allpets-observability` | reserved/empty — observability is **reused** from the shared `observability` namespace (§10) |
 
-> **The Spring backend runs in `allpets-backend`** (reconciled to the deployed manifests — see §1). It is reached by the site's **server-side `/api` proxy** over its **own public host** `api.allpets.kinvee.in` (cross-origin; the browser stays same-origin), and it is the workload from which all `appdb` + MinIO access originates — permitted by `allow-from-backend`. There is **no Payload** in this topology anymore.
+> **The Spring backend runs in `allpets-backend`** (reconciled to the deployed manifests — see §1). It is reached by the site's **server-side `/api` proxy** over its **own public host** `api.allpets.skpodduturi.dev` (cross-origin; the browser stays same-origin), and it is the workload from which all `appdb` + MinIO access originates — permitted by `allow-from-backend`. There is **no Payload** in this topology anymore.
 
 ### Enforced NetworkPolicy posture
 
@@ -202,7 +202,7 @@ Deployed allows (these are the exact policies in `allpets-backend/deploy/k8s/net
 | **Intra-namespace → Postgres** (Epic 4) | 5432 | any pod in `allpets-database` → Postgres | **NET-NEW** (`allow-intra-namespace-postgres.yaml`). |
 | **Intra-namespace → MinIO** (Epic 4) | 9000 | any pod in `allpets-database` → MinIO | **NET-NEW** (`allow-intra-namespace-minio.yaml`). |
 
-> **The site→API path is public, not in-cluster.** The Spring API is its own public host (`api.allpets.kinvee.in`). The browser stays **same-origin**: it calls the site's `/api/*` route-handler proxy, and the proxy's **server-side** fetch reaches the API **through Traefik** (`allow-traefik-ingress`, :8080) over the public host — **not** over an in-cluster frontend→backend pod path. So there is still **no `allow-from-frontend` policy**: the former in-cluster content-API seam is removed (content is file-based), and the proxy's outbound call rides egress → Traefik like any public client. An in-cluster `allow-from-frontend` allow would only be needed if the proxy were later re-pointed at an in-cluster Service URL; phase 1 deliberately uses the public host instead.
+> **The site→API path is public, not in-cluster.** The Spring API is its own public host (`api.allpets.skpodduturi.dev`). The browser stays **same-origin**: it calls the site's `/api/*` route-handler proxy, and the proxy's **server-side** fetch reaches the API **through Traefik** (`allow-traefik-ingress`, :8080) over the public host — **not** over an in-cluster frontend→backend pod path. So there is still **no `allow-from-frontend` policy**: the former in-cluster content-API seam is removed (content is file-based), and the proxy's outbound call rides egress → Traefik like any public client. An in-cluster `allow-from-frontend` allow would only be needed if the proxy were later re-pointed at an in-cluster Service URL; phase 1 deliberately uses the public host instead.
 >
 > **Why there is no frontend→database allow.** The Next.js site never opens a Postgres/MinIO connection: its marketing content is **file-based** (shipped in its image), and the only dynamic data (contact POST, reviews) comes from the **Spring API** over the public host, fetched **server-side by the site's `/api` proxy** (cross-origin). The Spring backend — running in `allpets-backend` — is the sole client of `appdb` and MinIO (covered by `allow-from-backend`). Keeping the data tier reachable **only** from `allpets-backend` is the deployed, verified posture; opening it to the frontend would widen the blast radius for no functional gain.
 >
@@ -214,33 +214,33 @@ Deployed allows (these are the exact policies in `allpets-backend/deploy/k8s/net
 
 ## 6. DNS & TLS
 
-### DNS — AWS Route 53 (`kinvee.in`)
+### DNS — Cloudflare (`skpodduturi.dev`)
 
-`kinvee.in` is a **user-owned AWS Route 53 public hosted zone** (`Z03680532RXMMGHR1HB0Y`), authoritative (registrar NS delegation matches the AWS set). The four allpets hosts are **live A-records** (not CNAME), TTL 300, all → **`50.35.125.239`** (quasar's WAN, effectively static — the home/office router statically forwards :80/:443 to Traefik):
+`skpodduturi.dev` is a **user-owned Cloudflare DNS zone**, authoritative (registrar NS delegation points at Cloudflare's assigned nameservers). The four allpets hosts are **live A-records** (not CNAME), in **DNS-only / "gray-cloud" mode** (Cloudflare proxy **OFF**), TTL 300 (or "Auto"), all → **`50.35.125.239`** (quasar's WAN, effectively static — the home/office router statically forwards :80/:443 to Traefik):
 
 | Host | Type | Target | TTL |
 |---|---|---|---|
-| `allpets.kinvee.in` | A | `50.35.125.239` | 300 |
-| `api.allpets.kinvee.in` | A | `50.35.125.239` | 300 |
-| `book.allpets.kinvee.in` | A | `50.35.125.239` | 300 |
-| `analytics.allpets.kinvee.in` | A | `50.35.125.239` | 300 |
+| `allpets.skpodduturi.dev` | A | `50.35.125.239` | 300 |
+| `api.allpets.skpodduturi.dev` | A | `50.35.125.239` | 300 |
+| `book.allpets.skpodduturi.dev` | A | `50.35.125.239` | 300 |
+| `analytics.allpets.skpodduturi.dev` | A | `50.35.125.239` | 300 |
 
-> **`api.allpets.kinvee.in` is the net-new A-record from the pivot** — same target `50.35.125.239`, same TTL 300; it fronts the Spring backend.
+> **`api.allpets.skpodduturi.dev` is the net-new A-record from the pivot** — same target `50.35.125.239`, same TTL 300; it fronts the Spring backend.
 
-**No Cloudflare** — no proxy, no Tunnel, no Access. The A-records point straight at the WAN IP; if that IP ever changes, the A-records are the single point to update (cert issuance is unaffected — see below).
+**Cloudflare is the DNS provider, in DNS-only ("gray-cloud") mode — not a reverse proxy, not a Tunnel, not Cloudflare Access.** Records are managed in the Cloudflare dashboard (or via the Cloudflare API); the proxy is left **OFF (gray cloud)** so Traefik, cert-manager, and the 308 redirect behave exactly as before — traffic resolves to the WAN IP and goes straight to Traefik, never through Cloudflare's edge. "Cloudflare-as-DNS" is **not** "Cloudflare-Access/Tunnel": there is no edge proxy, no tunnel, and no Cloudflare-side admin auth. The A-records point straight at the WAN IP; if that IP ever changes, the A-records are the single point to update (cert issuance is unaffected — see below). (`skpodduturi.dev` is on the browser **HSTS preload** list, so browsers force HTTPS regardless — reinforcing the always-HTTPS design of real certs + 308 redirect + HSTS header; no plain-http path is ever served to visitors.)
 
-### TLS — cert-manager + Traefik, `letsencrypt-prod`, **DNS-01**
+### TLS — cert-manager + Traefik, dedicated `letsencrypt-cloudflare` issuer, **DNS-01**
 
-TLS reuses quasar's existing **cert-manager `letsencrypt-prod` ClusterIssuer** — ACME **production** (`acme-v02.api.letsencrypt.org`), proven by 6+ live certs (e.g. `ai.kinvee.in`). The solver is **DNS-01 via Route 53** (hosted zone `Z03680532RXMMGHR1HB0Y`, region `ap-south-1`, creds in the k8s secret `route53-credentials`) — **not HTTP-01**.
+TLS reuses quasar's existing **cert-manager** install and the same ACME **production** endpoint (`acme-v02.api.letsencrypt.org`), proven by 6+ live certs (e.g. `ai.kinvee.in`). For allpets the design authors a **new, dedicated `letsencrypt-cloudflare` ClusterIssuer** rather than editing the shared cluster-wide `letsencrypt-prod` issuer — `letsencrypt-prod` also serves the aarogya healthcare-prod tenant and `ai.kinvee.in` (whose Route 53 solver is left untouched). The new issuer's solver is **DNS-01 via Cloudflare** (zone `skpodduturi.dev`, creds in the k8s secret `cloudflare-api-token` — a least-privilege API token scoped to **Zone.DNS:Edit + Zone.Zone:Read** on `skpodduturi.dev`) — **not HTTP-01**.
 
-**The Epic-3 spec's HTTP-01/port-80-for-issuance assumption is superseded.** Because cert-manager already controls the `kinvee.in` zone, it solves challenges by writing `_acme-challenge` **TXT** records — so:
-- The host certs issue with **zero** extra issuer / RBAC / secret config — just the Ingress annotation + a `tls` block. The new **`api.allpets.kinvee.in`** cert (`secretName: api-allpets-kinvee-in-tls`, in `allpets-backend`) issues the same way.
+**The Epic-3 spec's HTTP-01/port-80-for-issuance assumption is superseded.** The Cloudflare `skpodduturi.dev` zone is **net-new to cert-manager**, so — unlike the old Route 53 setup — issuance is **not** zero-config: it requires the new `letsencrypt-cloudflare` ClusterIssuer plus the `cloudflare-api-token` secret to be in place first. Once wired, cert-manager solves challenges by writing `_acme-challenge` **TXT** records into Cloudflare — so:
+- With the issuer + token in place, the host certs issue from **just** the Ingress annotation (`cert-manager.io/cluster-issuer: letsencrypt-cloudflare`) + a `tls` block. The new **`api.allpets.skpodduturi.dev`** cert (`secretName: api-allpets-skpodduturi-dev-tls`, in `allpets-backend`) issues the same way.
 - **Port-80 reachability is not required for issuance** (works even behind CGNAT); :80/:443 are only needed to *serve* traffic.
 - There is **no `/.well-known/acme-challenge` HTTP path** anywhere, so the HTTP→HTTPS redirect is safe — it cannot break ACME.
 
-**Ingress pattern (canonical — `deploy/k8s/ingress/`):** `apiVersion: networking.k8s.io/v1`, `kind: Ingress`; `spec.ingressClassName: traefik`; annotation `cert-manager.io/cluster-issuer: letsencrypt-prod`; `spec.tls: [{ hosts: [<host>], secretName: <host>-tls }]`; a single `host` rule, `path: /`, `pathType: Prefix` → the backend Service. An Ingress lives in the **same namespace as its Service**, so there is one Ingress per host — including a **new Ingress for `api.allpets.kinvee.in` in `allpets-backend`** (→ the Spring backend Service :8080, cert `api-allpets-kinvee-in-tls`). Each host also references a **per-namespace `redirect-https` Traefik Middleware** (`redirectScheme: https`, `permanent: true`, a **308**). The redirect is per-namespace (not a cluster-wide Traefik arg) because Traefik's `allowCrossNamespace` is OFF and a cluster-wide redirect would change behavior for every co-tenant including aarogya (healthcare prod). Renewal is automatic (~30 days before the 90-day expiry); expiry alerting is handed to 16.8.
+**Ingress pattern (canonical — `deploy/k8s/ingress/`):** `apiVersion: networking.k8s.io/v1`, `kind: Ingress`; `spec.ingressClassName: traefik`; annotation `cert-manager.io/cluster-issuer: letsencrypt-cloudflare`; `spec.tls: [{ hosts: [<host>], secretName: <host>-tls }]`; a single `host` rule, `path: /`, `pathType: Prefix` → the backend Service. An Ingress lives in the **same namespace as its Service**, so there is one Ingress per host — including a **new Ingress for `api.allpets.skpodduturi.dev` in `allpets-backend`** (→ the Spring backend Service :8080, cert `api-allpets-skpodduturi-dev-tls`). Each host also references a **per-namespace `redirect-https` Traefik Middleware** (`redirectScheme: https`, `permanent: true`, a **308**). The redirect is per-namespace (not a cluster-wide Traefik arg) because Traefik's `allowCrossNamespace` is OFF and a cluster-wide redirect would change behavior for every co-tenant including aarogya (healthcare prod). Renewal is automatic (~30 days before the 90-day expiry); expiry alerting is handed to 16.8.
 
-> **CORS (Spring side, not ingress).** Cross-origin access to the API is controlled by the **Spring app's CORS config**, not a Traefik middleware: the allowlist is exactly `https://allpets.kinvee.in` (the site origin), with the methods/headers the contact-form + reviews endpoints need and credentials off in phase 1. This keeps the origin boundary in one place (the app) and avoids adding the cluster's first cross-namespace Traefik middleware.
+> **CORS (Spring side, not ingress).** Cross-origin access to the API is controlled by the **Spring app's CORS config**, not a Traefik middleware: the allowlist is exactly `https://allpets.skpodduturi.dev` (the site origin), with the methods/headers the contact-form + reviews endpoints need and credentials off in phase 1. This keeps the origin boundary in one place (the app) and avoids adding the cluster's first cross-namespace Traefik middleware.
 
 ---
 
@@ -252,11 +252,11 @@ Two planes coexist on quasar; **they share the box but not the path**, and neith
 |---|---|---|
 | Purpose | Serve user traffic | Ship code + apply manifests |
 | Transport | Public internet → router :80/:443 → **Traefik** | **Tailscale** tailnet (CI runner joins as `tag:ci`) |
-| Path | Route 53 A-record → WAN `50.35.125.239` → Traefik → per-host Ingress → Service | GitHub Actions → GHCR → SSH to quasar over the tailnet → `kubectl` |
+| Path | Cloudflare DNS (DNS-only) A-record → WAN `50.35.125.239` → Traefik → per-host Ingress → Service | GitHub Actions → GHCR → SSH to quasar over the tailnet → `kubectl` |
 | Reaches | the four public hosts | the cluster API (`quasar.tailb77b7f.ts.net` / `100.108.60.90`) |
 | Auth boundary | app login / CORS allowlist (3.6 — no ingress auth middleware) | tailnet membership + SSH |
 
-**Why this matters architecturally:** the public API (`api.allpets.kinvee.in`) and admin surfaces are deliberately **not** routed through the deploy plane (no tailnet-only Ingress) — the public site must reach the Spring API from arbitrary visitor browsers, and clinic staff must reach the Cal.com admin from arbitrary, un-managed devices, so these surfaces stay on the public-ingress plane and are gated by app login / CORS / rate-limiting only (3.6). Keeping the planes orthogonal means the tailnet can evolve (15.11/15.12) without touching public access, and the public ingress can change without touching CI. Tailnet-only is reserved for future **operator-only** surfaces (e.g. the MinIO console :9001, internal debug endpoints, the Spring `actuator` if it is ever locked down to operators), not clinic-facing or public ones.
+**Why this matters architecturally:** the public API (`api.allpets.skpodduturi.dev`) and admin surfaces are deliberately **not** routed through the deploy plane (no tailnet-only Ingress) — the public site must reach the Spring API from arbitrary visitor browsers, and clinic staff must reach the Cal.com admin from arbitrary, un-managed devices, so these surfaces stay on the public-ingress plane and are gated by app login / CORS / rate-limiting only (3.6). Keeping the planes orthogonal means the tailnet can evolve (15.11/15.12) without touching public access, and the public ingress can change without touching CI. Tailnet-only is reserved for future **operator-only** surfaces (e.g. the MinIO console :9001, internal debug endpoints, the Spring `actuator` if it is ever locked down to operators), not clinic-facing or public ones.
 
 ---
 
@@ -342,10 +342,10 @@ Postgres runs as a plain Kubernetes `Deployment` + `local-path` PVC + `ClusterIP
 The nightly `pg_dump` CronJob → a **local PVC** is the **primary and only** backup (14-day retention). The original Backblaze B2 off-site copy (4.4 / 1.9) is **DROPPED**. Owner-accepted trade-off: same-box durability (a disk/host loss loses both the live data and its backups), **RPO ≈ 24h, no PITR** — in exchange for zero external dependency/credential/cost. Recorded so "why is there no off-site backup?" resolves to *this decision*, not an oversight. (Plausible ClickHouse backup is the separate 11.6 seam, port 8123.)
 
 ### 13.3 Admin surface **app-auth-only** — ADR [`admin-surface-decision.md`](./admin-surface-decision.md) (3.6)
-Sensitive surfaces — the Cal.com admin (on `book.allpets.kinvee.in`) and any future Spring-backend admin/auth surface — are protected by **application login only**: plain Ingress at `/`, **no** Traefik auth middleware (no basic-auth, no forward-auth), **no** tailnet-only Ingress, **no Cloudflare Access**. Rationale: mirrors the in-prod `admin.ai.kinvee.in` precedent on this box; non-technical clinic staff must reach admin surfaces from arbitrary devices (tailnet-only rejected); a middleware would be the first in the cluster (`allowCrossNamespace` is off). Brute-force defense is delegated to the app layer — rate-limiting (14.2) + session-cookie hygiene / no public signup (6.x Cal.com; the Spring backend's contact/reviews endpoints are unauthenticated POST/GET, rate-limited). (Payload `/admin` is **gone** — content is file-based, edited via Git.)
+Sensitive surfaces — the Cal.com admin (on `book.allpets.skpodduturi.dev`) and any future Spring-backend admin/auth surface — are protected by **application login only**: plain Ingress at `/`, **no** Traefik auth middleware (no basic-auth, no forward-auth), **no** tailnet-only Ingress, **no Cloudflare Access**. Rationale: mirrors the in-prod `admin.ai.kinvee.in` precedent on this box; non-technical clinic staff must reach admin surfaces from arbitrary devices (tailnet-only rejected); a middleware would be the first in the cluster (`allowCrossNamespace` is off). Brute-force defense is delegated to the app layer — rate-limiting (14.2) + session-cookie hygiene / no public signup (6.x Cal.com; the Spring backend's contact/reviews endpoints are unauthenticated POST/GET, rate-limited). (Payload `/admin` is **gone** — content is file-based, edited via Git.)
 
 ### 13.4 **DNS-01** over HTTP-01 — ADR [`deploy/k8s/ingress/README.md`](../deploy/k8s/ingress/README.md) (Epic 3, supersedes the Epic-3 spec)
-The `letsencrypt-prod` ClusterIssuer solves ACME challenges via the **DNS-01 Route 53 solver**, **not HTTP-01**. The Epic-3 spec's HTTP-01 / port-80-for-issuance assumption is **superseded** by the 2026-06-15 cluster verification. Consequences: certs issue with zero extra config (cert-manager already controls `kinvee.in`) — including the new `api.allpets.kinvee.in` cert; issuance doesn't need port-80 reachability; there is no ACME HTTP path, so the 308 HTTP→HTTPS redirect is safe.
+A dedicated **`letsencrypt-cloudflare` ClusterIssuer** (new for allpets, leaving the shared `letsencrypt-prod` issuer — which serves aarogya + `ai.kinvee.in` — untouched) solves ACME challenges via the **DNS-01 Cloudflare solver**, **not HTTP-01**. The Epic-3 spec's HTTP-01 / port-80-for-issuance assumption is **superseded**. Consequences: the Cloudflare `skpodduturi.dev` zone is net-new to cert-manager, so issuance needs the new issuer + `cloudflare-api-token` secret (**not** zero-config) — including the new `api.allpets.skpodduturi.dev` cert; once wired, issuance doesn't need port-80 reachability; there is no ACME HTTP path, so the 308 HTTP→HTTPS redirect is safe.
 
 ### 13.5 Cal.com self-hosted, **no Enterprise Edition** — decision_calcom
 Booking is delegated to self-hosted Cal.com (Cal.diy MIT fork preferred; fall back to Cal.com main without enabling EE) rather than a custom scheduler. Free, self-hosted, no recurring license fee. Accepted trade-offs from staying off EE: **no "any available vet"** round-robin (specific-vet selection only), **no pet-parent-configurable reminders** (admin-configured workflows instead), no multi-pet single booking, and **two admin UIs** (Cal.com + file-based content editing). All are recorded phase-2 candidates (req §11). Cal.com keeps its **own dedicated host** for cookies/OAuth.
@@ -362,8 +362,8 @@ Payload CMS is **removed entirely**: no CMS process, no `payload` content databa
 ### 13.9 **New Spring Boot backend service** — pivot 2026-06-17
 A **Spring Boot backend** (Gradle build, **Java 25 LTS**, latest **Spring Boot 3.x**, **Spring Data JPA + Flyway**, multi-stage **Docker** → GHCR) runs in `allpets-backend` and owns the phase-1 custom glue: **contact-form submissions** (persist + trigger email), a **Google-reviews cache** (scheduled fetch + serve), **transactional email**, and **health/actuator**. It owns the **`appdb`** database (role **`app_svc`**, renamed from the old `payload`) and the MinIO bucket. It is structured (clean domain packages, tenant-aware data conventions) to be the **seed of the phase-2 application** (13.11 / §11). JVM footprint is sized within the `allpets-backend` quota (§12).
 
-### 13.10 **Dedicated API host `api.allpets.kinvee.in` + CORS** — pivot 2026-06-17
-The Spring backend is exposed on its **own public host** `api.allpets.kinvee.in` — a new Route 53 A-record → `50.35.125.239`, its **own Traefik Ingress + cert-manager DNS-01 cert** (`api-allpets-kinvee-in-tls`) in `allpets-backend`. The Next.js site reaches it through a **same-origin route-handler proxy** whose **server-side** fetch is **cross-origin**; the API's **CORS allowlist** permits only `https://allpets.kinvee.in` (the proxy's server-side origin). Rationale: a clean, independent origin (own cert, own CORS, no path-routing entanglement with the site), while keeping the **browser same-origin** so CORS stays off the visitor's request path and the API host stays out of client bundles (Frontend LLD §4.2). **What the pivot removes is the old `/admin` passthrough and the in-cluster `allow-from-frontend` content-API call**; the same-origin `/api` proxy is retained and re-targeted from Payload to Spring.
+### 13.10 **Dedicated API host `api.allpets.skpodduturi.dev` + CORS** — pivot 2026-06-17
+The Spring backend is exposed on its **own public host** `api.allpets.skpodduturi.dev` — a new Cloudflare (DNS-only) A-record → `50.35.125.239`, its **own Traefik Ingress + cert-manager DNS-01 cert** (`api-allpets-skpodduturi-dev-tls`, issued by the `letsencrypt-cloudflare` issuer) in `allpets-backend`. The Next.js site reaches it through a **same-origin route-handler proxy** whose **server-side** fetch is **cross-origin**; the API's **CORS allowlist** permits only `https://allpets.skpodduturi.dev` (the proxy's server-side origin). Rationale: a clean, independent origin (own cert, own CORS, no path-routing entanglement with the site), while keeping the **browser same-origin** so CORS stays off the visitor's request path and the API host stays out of client bundles (Frontend LLD §4.2). **What the pivot removes is the old `/admin` passthrough and the in-cluster `allow-from-frontend` content-API call**; the same-origin `/api` proxy is retained and re-targeted from Payload to Spring.
 
 ### 13.11 **Build the Spring backend as the phase-2 seed (now)** — pivot 2026-06-17; §11
 Rather than a disposable phase-1 utility, the Spring backend is built to **grow into the phase-2 application** — pet/patient profiles (the deferred Pet Portal) + multi-branch multi-tenancy. Phase 1 builds only the small glue, but with a clean domain/package layout and tenant-aware data conventions so phase 2 extends it. MinIO is retained as the future home for **pet-profile photos/documents**. **Multi-tenancy modeling is an open phase-2 design topic** (shared-schema `tenant_id` vs schema-per-tenant vs db-per-tenant); profiles + multi-tenancy will get their **own HLD/LLD** and are **not built in phase 1**.
@@ -375,8 +375,8 @@ Rather than a disposable phase-1 utility, the Spring backend is built to **grow 
 Recorded so a reviewer grepping these terms finds only disclaimers — none of the following is part of phase 1:
 
 - **Headless CMS / Payload** — **not used**. Marketing content is **file-based** (typed / MDX in `allpets-frontend`), edited via Git commit + auto-deploy (13.8). No content database, no content admin UI.
-- **Cloudflare** — not used (no proxy / Tunnel / Access). Hosts are plain Route 53 A-records → quasar WAN.
-- **HTTP-01** — not used / **superseded**. Cert solver is **DNS-01** via Route 53.
+- **Cloudflare** — used as the **DNS provider only**, in DNS-only ("gray-cloud") mode (no proxy / Tunnel / Access). Hosts are plain Cloudflare A-records (proxy OFF) → quasar WAN. "Cloudflare-as-DNS" is **not** "Cloudflare-Access/Tunnel".
+- **HTTP-01** — not used / **superseded**. Cert solver is **DNS-01** via Cloudflare (the dedicated `letsencrypt-cloudflare` issuer).
 - **CloudNativePG (CNPG)** — not used. Postgres is a plain `Deployment` (13.1). Re-evaluated phase-2.
 - **sealed-secrets / SOPS / external-secrets** — not used in phase 1. Phase-2 hardening (§8).
 - **GitOps (Flux / Argo)** — not used. CD is push-based over Tailscale (13.6). Phase-2 candidate.
@@ -384,7 +384,7 @@ Recorded so a reviewer grepping these terms finds only disclaimers — none of t
 - **Off-site backup (Backblaze B2)** — dropped (13.2). Local-only nightly `pg_dump`.
 - **Pet profiles / multi-tenancy** — **not built in phase 1**. The Spring backend is only *seeded* for them; both are phase-2 with their own HLD/LLD (13.11 / §11).
 - **`allpets-frontend → allpets-database` NetworkPolicy** — not deployed and not needed; the data tier is reached only from `allpets-backend` (13.7).
-- **`/admin` passthrough + in-cluster frontend→backend content API** — removed by the pivot (content is file-based; no in-cluster `allow-from-frontend`). The **same-origin `/api` proxy is retained** and re-targeted from Payload to the Spring API; the browser stays same-origin while the proxy server-side-fetches `api.allpets.kinvee.in` cross-origin (13.10 / Frontend LLD §4.2).
+- **`/admin` passthrough + in-cluster frontend→backend content API** — removed by the pivot (content is file-based; no in-cluster `allow-from-frontend`). The **same-origin `/api` proxy is retained** and re-targeted from Payload to the Spring API; the browser stays same-origin while the proxy server-side-fetches `api.allpets.skpodduturi.dev` cross-origin (13.10 / Frontend LLD §4.2).
 
 ---
 
@@ -394,7 +394,7 @@ Recorded so a reviewer grepping these terms finds only disclaimers — none of t
 - Deploy/ops runbook: [`planning/deployment.md`](./deployment.md) — cluster base (Epic 2), DNS/TLS/ingress (Epic 3), data-tier ops (Epic 4), CI/CD (Epic 15).
 - ADR 4.1 (plain Postgres, no off-site): [`planning/database-decision.md`](./database-decision.md).
 - ADR 3.6 (admin app-auth-only): [`planning/admin-surface-decision.md`](./admin-surface-decision.md).
-- Ingress pattern (Route 53 + Traefik + cert-manager DNS-01): [`deploy/k8s/ingress/README.md`](../deploy/k8s/ingress/README.md).
+- Ingress pattern (Cloudflare + Traefik + cert-manager DNS-01): [`deploy/k8s/ingress/README.md`](../deploy/k8s/ingress/README.md).
 - Deployed NetworkPolicies: [`deploy/k8s/networkpolicies/backend-database.yaml`](../deploy/k8s/networkpolicies/backend-database.yaml) (+ `allow-intra-namespace-postgres.yaml`, `allow-intra-namespace-minio.yaml`); frontend side: [`allpets-frontend/deploy/k8s/networkpolicy.yaml`](../../allpets-frontend/deploy/k8s/networkpolicy.yaml).
 - Epic 19 issue specs: [`planning/issues/epic-19-design-baseline.md`](../../planning/issues/epic-19-design-baseline.md).
 - LLDs that cite this spine: [`planning/lld-backend.md`](./lld-backend.md) (19.2), [`allpets-frontend/planning/lld-frontend.md`](../../allpets-frontend/planning/lld-frontend.md) (19.3).

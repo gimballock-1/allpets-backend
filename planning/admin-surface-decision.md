@@ -5,10 +5,10 @@
 > **Status:** Accepted — 2026-06-15.
 >
 > **Scope:** how the two sensitive admin surfaces are protected at the ingress layer:
-> - **Payload `/admin`** — served on `allpets.kinvee.in` (same host as the marketing site), namespace `allpets-frontend`.
-> - **Cal.com admin** — served on `book.allpets.kinvee.in`, namespace `allpets-backend`.
+> - **Payload `/admin`** — served on `allpets.skpodduturi.dev` (same host as the marketing site), namespace `allpets-frontend`.
+> - **Cal.com admin** — served on `book.allpets.skpodduturi.dev`, namespace `allpets-backend`.
 >
-> `analytics.allpets.kinvee.in` (Plausible) is out of scope for this ADR except where noted; Plausible's own login gates its dashboard and it is not a clinic-staff content surface.
+> `analytics.allpets.skpodduturi.dev` (Plausible) is out of scope for this ADR except where noted; Plausible's own login gates its dashboard and it is not a clinic-staff content surface.
 
 ---
 
@@ -16,8 +16,8 @@
 
 | Surface | Host | Namespace | **Decision** | TLS secret | Instruction to 3.4 |
 |---|---|---|---|---|---|
-| Payload `/admin` | `allpets.kinvee.in` | `allpets-frontend` | **App-auth-only** (plain Ingress, no middleware) | `allpets-kinvee-in-tls` | No extra ingress middleware on `/admin`; single `/` rule to the Next.js/Payload Service. |
-| Cal.com admin | `book.allpets.kinvee.in` | `allpets-backend` | **App-auth-only** (plain Ingress, no middleware) | `book-allpets-kinvee-in-tls` | No extra ingress middleware; dedicated-host `/` rule to the Cal.com Service. |
+| Payload `/admin` | `allpets.skpodduturi.dev` | `allpets-frontend` | **App-auth-only** (plain Ingress, no middleware) | `allpets-skpodduturi-dev-tls` | No extra ingress middleware on `/admin`; single `/` rule to the Next.js/Payload Service. |
+| Cal.com admin | `book.allpets.skpodduturi.dev` | `allpets-backend` | **App-auth-only** (plain Ingress, no middleware) | `book-allpets-skpodduturi-dev-tls` | No extra ingress middleware; dedicated-host `/` rule to the Cal.com Service. |
 
 **Both surfaces: app-auth-only.** No Traefik `Middleware` (no forward-auth, no basic-auth), no second tailnet-scoped Ingress. The application's own login is the authentication boundary; ingress only terminates TLS and routes the Host header. Brute-force exposure of the public login pages is mitigated at the *application* layer by rate-limiting (Epic 14.2), not at the ingress.
 
@@ -33,7 +33,7 @@ The Epic-3 spec text predates a 2026-06-15 cluster verification; where they diff
 
 2. **No Traefik Middleware machinery exists anywhere in the cluster.** There are zero `Middleware` objects and zero `IngressRoute` CRDs in the cluster today; every co-tenant (aarogya, local-ai, home-assistant, grafana) uses a plain `networking.k8s.io/v1` Ingress. Choosing forward-auth or basic-auth would mean introducing the *first* Middleware on the box. Additionally, Traefik's `allowCrossNamespace` is **not** set, so a `Middleware` can only be referenced from its own namespace — any admin-path middleware would have to be authored and maintained inside `allpets-frontend` / `allpets-backend`, as net-new surface with its own failure modes. App-auth-only adds none of this.
 
-3. **Certs issue via DNS-01, not HTTP-01.** The `letsencrypt-prod` ClusterIssuer uses the **DNS-01** Route53 solver (cert-manager already controls the `kinvee.in` zone). There is therefore **no `/.well-known/acme-challenge` HTTP path** that an admin protection could accidentally clobber, and an HTTP→HTTPS redirect cannot break cert issuance. This removes the only reason an ingress-layer auth control would need careful path-exclusion work — but it does not change the recommendation, which stays app-auth-only on its own merits.
+3. **Certs issue via DNS-01, not HTTP-01.** A new dedicated allpets ClusterIssuer (`letsencrypt-cloudflare`) uses the **DNS-01** **Cloudflare** solver on the `skpodduturi.dev` zone (net-new to cert-manager, so it needs the `cloudflare-api-token` secret — Cloudflare is the DNS provider only, not a proxy/Tunnel/Access). There is therefore **no `/.well-known/acme-challenge` HTTP path** that an admin protection could accidentally clobber, and an HTTP→HTTPS redirect cannot break cert issuance. This removes the only reason an ingress-layer auth control would need careful path-exclusion work — but it does not change the recommendation, which stays app-auth-only on its own merits.
 
 4. **Same physical box, residential/office WAN, effectively static IP, port-forwarded 80/443.** No special perimeter exists beyond the router forward; the security boundary that matters for these surfaces is the application login, which is exactly what app-auth-only relies on.
 
@@ -63,15 +63,15 @@ Expose the admin surface only on the Tailscale tailnet (the deploy plane, 15.11/
 
 ## Per-surface decisions and rationale
 
-### Payload `/admin` (`allpets.kinvee.in`, ns `allpets-frontend`) → **app-auth-only**
+### Payload `/admin` (`allpets.skpodduturi.dev`, ns `allpets-frontend`) → **app-auth-only**
 
 **Rationale.** Payload `/admin` is a **clinic-staff content surface**: non-technical staff must reach it from arbitrary, un-managed devices to update hours, services, team bios, and announcements. That single requirement eliminates option (c) tailnet-only — we are not requiring staff to join the tailnet, and that constraint is *explicitly rejected*, not silently assumed. Between (a) and (b), the in-prod precedent on this exact box (`admin.ai.kinvee.in`) is already app-auth-only with a plain Ingress and no middleware, and Payload's own auth (5.11; HttpOnly+Secure+SameSite cookies, no public signup, per req §5.3) is a *required* deliverable regardless of this decision — so adding a Traefik basic-auth/forward-auth wall would be redundant infrastructure (a second login UX hostile to non-technical staff, a second secret to rotate, and the first `Middleware` in a cluster where `allowCrossNamespace` is off). The residual risk — a public, brute-forceable login page — is real but is the *correct layer* to defend at the application: rate-limiting and lockout (14.2). **Decision: app-auth-only; no `/admin` middleware; single `/` Ingress rule routing the host to the Next.js/Payload Service.**
 
 **Trade-off accepted:** the Payload login page is internet-facing. Mitigated by 14.2 (rate-limit/lockout) + 5.11 (session cookie hygiene, no public signup). Not mitigated: endpoint existence is discoverable. Judged acceptable for the phase-1 bar.
 
-### Cal.com admin (`book.allpets.kinvee.in`, ns `allpets-backend`) → **app-auth-only**
+### Cal.com admin (`book.allpets.skpodduturi.dev`, ns `allpets-backend`) → **app-auth-only**
 
-**Rationale.** `book.allpets.kinvee.in` must serve **public booking traffic** on the same host; the Cal.com admin is a path/area within that same application, not a separable host. A network-level control (tailnet-only) is impossible without breaking public booking, and a host-wide basic-auth/forward-auth wall would sit in front of the *public booking flow* too — unacceptable. Path-scoping a middleware to just the Cal.com admin routes is brittle against Cal.com's internal routing and, again, would be the first `Middleware` in the cluster for marginal benefit. Cal.com ships its own authenticated admin/login with no-public-signup configuration (6.x), which is the appropriate boundary. **Decision: app-auth-only; no middleware; dedicated-host `/` Ingress rule to the Cal.com Service** (keep `book` a dedicated host — never a path under `allpets` — because Cal.com needs its own host for cookies/OAuth callbacks, req §9).
+**Rationale.** `book.allpets.skpodduturi.dev` must serve **public booking traffic** on the same host; the Cal.com admin is a path/area within that same application, not a separable host. A network-level control (tailnet-only) is impossible without breaking public booking, and a host-wide basic-auth/forward-auth wall would sit in front of the *public booking flow* too — unacceptable. Path-scoping a middleware to just the Cal.com admin routes is brittle against Cal.com's internal routing and, again, would be the first `Middleware` in the cluster for marginal benefit. Cal.com ships its own authenticated admin/login with no-public-signup configuration (6.x), which is the appropriate boundary. **Decision: app-auth-only; no middleware; dedicated-host `/` Ingress rule to the Cal.com Service** (keep `book` a dedicated host — never a path under `allpets` — because Cal.com needs its own host for cookies/OAuth callbacks, req §9).
 
 **Trade-off accepted:** same as Payload — public login surface, mitigated at the app layer (Cal.com login throttling + 14.2 where it applies). Booking traffic is public by design, so no network gate is even desirable here.
 
@@ -85,8 +85,8 @@ Tailnet-only remains the right tool for **truly operator-only surfaces** (e.g. i
 
 3.4 implements exactly this; no admin-protection guesswork remains.
 
-- **Payload `/admin` (`allpets.kinvee.in`):** **No extra ingress middleware (app-auth-only).** Author the single `allpets-frontend`-namespaced Ingress per the canonical reference shape — `apiVersion: networking.k8s.io/v1`, `kind: Ingress`, `metadata.annotations: { cert-manager.io/cluster-issuer: letsencrypt-prod }`, `spec.ingressClassName: traefik`, `spec.tls: [{ hosts: [allpets.kinvee.in], secretName: allpets-kinvee-in-tls }]`, one rule `host: allpets.kinvee.in`, `http.paths: [{ path: /, pathType: Prefix, backend → Next.js/Payload Service }]`. Do **not** add a separate `/admin` rule, a `traefik.ingress.kubernetes.io/router.middlewares` annotation, basic-auth, or forward-auth. (Ingress is authored in the **allpets-frontend repo** by 7.8, which copies this shared pattern; 3.4 owns the pattern.)
-- **Cal.com admin (`book.allpets.kinvee.in`):** **No extra ingress middleware (app-auth-only).** Author the `allpets-backend`-namespaced Ingress with the identical shape — `secretName: book-allpets-kinvee-in-tls`, one rule `host: book.allpets.kinvee.in`, `path: /` Prefix → Cal.com Service. Dedicated host only; never a path under `allpets`. No middleware/auth annotation.
+- **Payload `/admin` (`allpets.skpodduturi.dev`):** **No extra ingress middleware (app-auth-only).** Author the single `allpets-frontend`-namespaced Ingress per the canonical reference shape — `apiVersion: networking.k8s.io/v1`, `kind: Ingress`, `metadata.annotations: { cert-manager.io/cluster-issuer: letsencrypt-cloudflare }`, `spec.ingressClassName: traefik`, `spec.tls: [{ hosts: [allpets.skpodduturi.dev], secretName: allpets-skpodduturi-dev-tls }]`, one rule `host: allpets.skpodduturi.dev`, `http.paths: [{ path: /, pathType: Prefix, backend → Next.js/Payload Service }]`. Do **not** add a separate `/admin` rule, a `traefik.ingress.kubernetes.io/router.middlewares` annotation, basic-auth, or forward-auth. (Ingress is authored in the **allpets-frontend repo** by 7.8, which copies this shared pattern; 3.4 owns the pattern.)
+- **Cal.com admin (`book.allpets.skpodduturi.dev`):** **No extra ingress middleware (app-auth-only).** Author the `allpets-backend`-namespaced Ingress with the identical shape — `secretName: book-allpets-skpodduturi-dev-tls`, one rule `host: book.allpets.skpodduturi.dev`, `path: /` Prefix → Cal.com Service. Dedicated host only; never a path under `allpets`. No middleware/auth annotation.
 - **HTTP→HTTPS redirect:** owned by **3.4**, which decides **YES — a 308 redirect via a per-namespace Traefik `redirect-https` Middleware** (safe because DNS-01 means there is no ACME HTTP path to protect). This is orthogonal to this admin decision: the admin surfaces simply ride the same `redirect-https` Middleware their host already carries — they get no *additional* middleware beyond it.
 - **Do not introduce any Traefik `Middleware` object** for these surfaces. None exists in the cluster and `allowCrossNamespace` is off; adding one is net-new surface this decision rejects.
 
@@ -113,7 +113,7 @@ If phase-2 migration puts quasar behind clinic **CGNAT** (no port-forward possib
 
 - Epic 3 spec: `planning/issues/epic-03-dns-tls-ingress.md` §3.6, §3.4 (admin-surface reflection in the Ingress), §3.7 (runbook records this decision).
 - In-prod precedent: live `local-ai-admin/admin-frontend-ingress` (`admin.ai.kinvee.in`) and `local-ai/ai-proxy-ingress` (`ai.kinvee.in`) — plain Ingress, no middleware.
-- Verified cluster + DNS facts, 2026-06-15 (DNS-01 Route53 solver; no Middleware/IngressRoute in cluster; `allowCrossNamespace` unset; single-node k3s Traefik).
+- Verified cluster facts, 2026-06-15 (no Middleware/IngressRoute in cluster; `allowCrossNamespace` unset; single-node k3s Traefik). DNS/TLS for allpets is post-pivot design: DNS-01 via a net-new Cloudflare solver on the `skpodduturi.dev` zone (the dedicated `letsencrypt-cloudflare` issuer), to be stood up by the domain pivot — not part of the 2026-06-15 live-cluster verification.
 - req §5.3 (auth/session cookies, no public signup), §8.4 (TLS via cert-manager + Let's Encrypt), §9 (domains/hosts; Cal.com dedicated host).
-- Rev 3 (deploy plane = Tailscale, orthogonal) + Rev 4 (no Cloudflare Access) changelogs; breakdown 3.6 lean note.
+- Rev 3 (deploy plane = Tailscale, orthogonal) + Rev 4 (Cloudflare is the DNS provider in DNS-only / "gray-cloud" mode only — **not** used as a reverse proxy, Tunnel, or for Cloudflare Access / admin auth; "Cloudflare-as-DNS" ≠ "Cloudflare-Access/Tunnel", so admin auth stays app-layer) changelogs; breakdown 3.6 lean note.
 

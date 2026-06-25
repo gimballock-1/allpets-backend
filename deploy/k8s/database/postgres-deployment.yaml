@@ -32,7 +32,7 @@ metadata:
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   replicas: 1
   strategy:
@@ -45,7 +45,7 @@ spec:
       labels:
         app.kubernetes.io/name: postgres
         app.kubernetes.io/part-of: allpets
-        allpets.kinvee.in/tier: database
+        allpets.skpodduturi.dev/tier: database
     spec:
       securityContext:
         # postgres image runs as uid 999; fsGroup lets it own the local-path volume.

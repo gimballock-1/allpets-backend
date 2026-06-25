@@ -50,7 +50,7 @@ metadata:
     app.kubernetes.io/name: pgdump
     app.kubernetes.io/component: backup
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   # 03:00 cluster time. Confirm no co-tenant nightly job (aarogya/local-ai-proxy)
   # contends at this hour on quasar; shift a slot if so (see applyNotes/runbook).
@@ -67,7 +67,7 @@ spec:
         app.kubernetes.io/name: pgdump
         app.kubernetes.io/component: backup
         app.kubernetes.io/part-of: allpets
-        allpets.kinvee.in/tier: database
+        allpets.skpodduturi.dev/tier: database
     spec:
       # One automatic retry on transient failure, then give up (alert via the
       # failedJobs history / dashboards). Avoids hammering a wedged DB.
@@ -80,7 +80,7 @@ spec:
             app.kubernetes.io/name: pgdump
             app.kubernetes.io/component: backup
             app.kubernetes.io/part-of: allpets
-            allpets.kinvee.in/tier: database
+            allpets.skpodduturi.dev/tier: database
         spec:
           restartPolicy: OnFailure
           securityContext:
