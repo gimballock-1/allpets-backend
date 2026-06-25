@@ -67,3 +67,11 @@ logging:
   level:
     root: INFO
     com.allpets.api: INFO
+
+# allpets application config.
+allpets:
+  cors:
+    # Origin allowlist for the public API host (20.4). The Next.js site's server-side
+    # /api proxy origin; credentials are off. CORS is enforced in Spring (CorsConfig),
+    # not at the ingress. Comma-separate for multiple origins.
+    allowed-origins: ${ALLPETS_CORS_ALLOWED_ORIGINS:https://allpets.skpodduturi.dev}

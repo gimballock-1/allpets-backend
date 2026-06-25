@@ -62,6 +62,7 @@ net-new to cert-manager and was **not** part of the 2026-06-15 verification.
 | `allpets.skpodduturi.dev` | `allpets-frontend` | Next.js site (Payload `/admin` same host) | 3000 | `allpets-skpodduturi-dev-tls` | 7.8 + 5.13 | **allpets-frontend repo** |
 | `book.allpets.skpodduturi.dev` | `allpets-backend` | Cal.com self-hosted | 3000 | `book-allpets-skpodduturi-dev-tls` | 6.3 | this repo |
 | `analytics.allpets.skpodduturi.dev` | `allpets-backend` | Plausible CE | 8000 | `analytics-allpets-skpodduturi-dev-tls` | 11.1 | this repo |
+| `api.allpets.skpodduturi.dev` | `allpets-backend` | Spring backend (`allpets-api`) | 8080 | `api-allpets-skpodduturi-dev-tls` | 20.4 (ingress + CORS) · 20.5 (service + wire-in) | this repo (`deploy/k8s/api/ingress.yaml`) |
 
 Rules that are **non-negotiable** for every allpets host Ingress:
 
