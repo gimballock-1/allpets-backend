@@ -23,7 +23,7 @@ resources:
   # intentionally NOT included here (see database/kustomization.yaml).
   - database
   # Epic 20.4 — dedicated Cloudflare DNS-01 ClusterIssuer (letsencrypt-cloudflare).
-  # cloudflare-api-token is a Secret applied out-of-band (see cert-manager/kustomization.yaml).
+  # cloudflare-api-token-secret is a Secret applied out-of-band (see cert-manager/kustomization.yaml).
   - cert-manager
   # Epic 20.5 — Spring backend on api.allpets.skpodduturi.dev. One `apply -k` applies
   # the redirect-https Middleware and the api/ Ingress together (kustomize sorts output

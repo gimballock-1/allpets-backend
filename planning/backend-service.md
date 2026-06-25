@@ -145,7 +145,7 @@ Templates show the shape:
   (= the `app_svc` role password, i.e. the same value as `APP_SVC_PASSWORD` in the
   database's `postgres-secret` — a workload can't read a Secret across namespaces). Mail
   (Epic 13) and the Google Places key (Epic 10) are pre-shaped for when those land.
-- **`deploy/k8s/cert-manager/cloudflare-api-token.example.yaml`** → `cloudflare-api-token`
+- **`deploy/k8s/cert-manager/cloudflare-api-token-secret.example.yaml`** → `cloudflare-api-token-secret`
   in the `cert-manager` namespace (the DNS-01 solver token).
 - **`deploy/k8s/database/postgres-secret.example.yaml`** → the DB's `postgres-secret`.
 
@@ -206,10 +206,10 @@ namespaced Secrets must exist **before** the workloads start, so order matters.
    ```
 2. **DNS** — in Cloudflare, create the `skpodduturi.dev` **A-records** (`allpets`, `api.allpets`,
    `book.allpets`, `analytics.allpets`) → `50.35.125.239`, **DNS-only / gray-cloud** (proxy OFF).
-3. **cert-manager token** — create the real `cloudflare-api-token` in the `cert-manager`
+3. **cert-manager token** — create the real `cloudflare-api-token-secret` in the `cert-manager`
    namespace (least-privilege `Zone.DNS:Edit` + `Zone.Zone:Read` on `skpodduturi.dev`):
    ```bash
-   kubectl -n cert-manager create secret generic cloudflare-api-token --from-literal=api-token='<TOKEN>'
+   kubectl -n cert-manager create secret generic cloudflare-api-token-secret --from-literal=api-token='<TOKEN>'
    ```
 4. **Secrets** — `apply -k` includes the database substrate, so **all three** must exist
    first or the Postgres / MinIO / API pods fail to start on a fresh cluster:
@@ -283,7 +283,7 @@ curl -si -X OPTIONS https://api.allpets.skpodduturi.dev/contact \
 | `ImagePullBackOff` | image not pushed yet, or private package without a pull secret | Confirm the manual push (or CI, once 15.4 lands) pushed the tag; create the `ghcr-pull` Secret if the package is private |
 | `OOMKilled` at startup/under load | heap + non-heap exceeds the memory limit | The Deployment caps heap at 60% of the 1.5Gi limit (`JAVA_OPTS`); raise the limit or lower the % |
 | Browser CORS error from the site | origin not in the allowlist | Set `ALLPETS_CORS_ALLOWED_ORIGINS` to include the calling origin |
-| `certificate … not Ready` | Cloudflare token missing/invalid, or the A-record/zone not set | Check the `cloudflare-api-token` Secret + `kubectl -n allpets-backend describe certificate …`/`order`/`challenge` |
+| `certificate … not Ready` | Cloudflare token missing/invalid, or the A-record/zone not set | Check the `cloudflare-api-token-secret` Secret + `kubectl -n allpets-backend describe certificate …`/`order`/`challenge` |
 
 ---
 

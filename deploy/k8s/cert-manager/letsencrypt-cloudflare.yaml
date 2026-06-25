@@ -7,13 +7,13 @@
 # is LEFT UNTOUCHED. See deploy/k8s/ingress/README.md and planning/deployment.md §2.4.
 #
 # Solver: ACME production, DNS-01 via Cloudflare for the `skpodduturi.dev` zone. The
-# API token lives in the `cloudflare-api-token` Secret (see cloudflare-api-token.example.yaml)
+# API token lives in the `cloudflare-api-token-secret` Secret (see cloudflare-api-token-secret.example.yaml)
 # — least privilege Zone.DNS:Edit + Zone.Zone:Read on skpodduturi.dev. Because this is a
 # ClusterIssuer, cert-manager reads that Secret from its OWN namespace
 # (--cluster-resource-namespace, default `cert-manager`), not the workload namespace.
 # DNS-01 needs no port-80 reachability and no ACME HTTP path.
 #
-# LIVE STEP — applying this does NOT finish 20.4's cert: the real `cloudflare-api-token`
+# LIVE STEP — applying this does NOT finish 20.4's cert: the real `cloudflare-api-token-secret`
 # Secret must exist in the cert-manager namespace AND the skpodduturi.dev A-records must
 # be created (the zone is net-new) before any <host>-tls cert reaches Ready.
 apiVersion: cert-manager.io/v1
@@ -25,14 +25,14 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: skrx7392@gmail.com
+    email: saikrishnareddy7392@gmail.com
     privateKeySecretRef:
       name: letsencrypt-cloudflare-account-key   # cert-manager stores the ACME account key here
     solvers:
       - dns01:
           cloudflare:
             apiTokenSecretRef:
-              name: cloudflare-api-token
+              name: cloudflare-api-token-secret
               key: api-token
         selector:
           dnsZones:

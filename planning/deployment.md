@@ -33,7 +33,7 @@
 - cert-manager + cainjector + webhook healthy.
 - **Existing shared ClusterIssuer `letsencrypt-prod`** Ready — ACME **production**
   (`acme-v02.api.letsencrypt.org`), email `skrx7392@gmail.com`, **DNS-01 via AWS Route 53** for the `kinvee.in` zone. It also serves the **co-tenants** (`aarogya` healthcare-prod, `ai.kinvee.in`) and is **left untouched** — do **not** edit it for allpets.
-- **NET-NEW for allpets:** allpets now lives on `skpodduturi.dev`, a **Cloudflare** zone that cert-manager does **not** yet control, so allpets gets its **own dedicated ClusterIssuer `letsencrypt-cloudflare`** — ACME **production** (same directory + email), **DNS-01 via the Cloudflare solver** (API token in the k8s secret `cloudflare-api-token`, least-privilege Zone.DNS:Edit + Zone.Zone:Read on `skpodduturi.dev` — **not** HTTP-01). Epic-3 Ingress annotation:
+- **NET-NEW for allpets:** allpets now lives on `skpodduturi.dev`, a **Cloudflare** zone that cert-manager does **not** yet control, so allpets gets its **own dedicated ClusterIssuer `letsencrypt-cloudflare`** — ACME **production** (same Let's Encrypt directory; email `saikrishnareddy7392@gmail.com`), **DNS-01 via the Cloudflare solver** (API token in the k8s secret `cloudflare-api-token-secret`, least-privilege Zone.DNS:Edit + Zone.Zone:Read on `skpodduturi.dev` — **not** HTTP-01). Epic-3 Ingress annotation:
   `cert-manager.io/cluster-issuer: letsencrypt-cloudflare`.
 
 ### 1.4 Namespaces (2.5)
@@ -94,7 +94,7 @@ Cloud** (drops the heaviest in-cluster trio), (2) trim observability retention,
 All allpets manifests apply via `kubectl apply -k deploy/k8s` (per repo). **Full
 "rebuild cleanly on a fresh server from the repo" is deferred to the Epic-15
 hardening pass** (capture substrate: the allpets `letsencrypt-cloudflare` issuer +
-`cloudflare-api-token` secret + k3s install; observability portability; a
+`cloudflare-api-token-secret` secret + k3s install; observability portability; a
 BOOTSTRAP/DR runbook with the secret checklist + restore-from-B2 + Cloudflare DNS
 repoint). See `allpets-backend#131`.
 
@@ -123,7 +123,7 @@ repoint). See `allpets-backend#131`.
 - **Cert path (independent of the request path):** **cert-manager** sees the
   Ingress `cert-manager.io/cluster-issuer: letsencrypt-cloudflare` annotation +
   `spec.tls` → solves **ACME DNS-01** by writing `_acme-challenge` **TXT** records into
-  the `skpodduturi.dev` **Cloudflare** zone via the `cloudflare-api-token` solver (this
+  the `skpodduturi.dev` **Cloudflare** zone via the `cloudflare-api-token-secret` solver (this
   zone is **net-new** to cert-manager) → Let's Encrypt issues → cert stored in the
   named `<host>-tls` Secret. **Port 80/443 reachability is not required for issuance**
   (works even behind CGNAT); it is only required to *serve* traffic.
@@ -156,7 +156,7 @@ repoint). See `allpets-backend#131`.
   API** with a least-privilege API token (Zone.DNS:Edit + Zone.Zone:Read on
   `skpodduturi.dev`). **No Cloudflare token is committed to the repo** — the operator
   token lives outside the repo. (cert-manager has its *own* separate Cloudflare token,
-  in the k8s secret `cloudflare-api-token`; see §2.4.)
+  in the k8s secret `cloudflare-api-token-secret`; see §2.4.)
 - **Add / change an A record** — easiest in the **Cloudflare dashboard** (DNS →
   Records → Add record: type **A**, name `<host>`, IPv4 `50.35.125.239`, TTL Auto/300,
   **Proxy status: DNS only**). Or via the Cloudflare API with the same least-privilege
@@ -183,7 +183,7 @@ repoint). See `allpets-backend#131`.
   are the single point to update. Either (a) re-run the §2.2 Cloudflare API call (POST
   to create, or PATCH the existing record by id) for each allpets host with the new
   IP, or (b) stand up a DDNS updater (e.g. a small cron PATCHing the Cloudflare A
-  records with the detected IP, using a least-privilege `cloudflare-api-token`).
+  records with the detected IP, using a least-privilege `cloudflare-api-token-secret`).
   DNS-01 cert issuance is unaffected by an IP change — only request serving is.
   (Long-term, a phase-2 CGNAT line would move ingress to Tailscale Funnel / a tunnel —
   Epic 1; transport only, not this design.)
@@ -192,14 +192,14 @@ repoint). See `allpets-backend#131`.
 - **Dedicated ClusterIssuer `letsencrypt-cloudflare`** (NET-NEW for allpets; do **not**
   edit the shared `letsencrypt-prod`, which serves the `aarogya` + `ai.kinvee.in`
   co-tenants), ACME **production**
-  (`https://acme-v02.api.letsencrypt.org/directory`), email `skrx7392@gmail.com`.
+  (`https://acme-v02.api.letsencrypt.org/directory`), email `saikrishnareddy7392@gmail.com`.
 - **Solver is DNS-01 via Cloudflare** — zone `skpodduturi.dev`, API token in the **k8s
-  secret `cloudflare-api-token`** (least-privilege Zone.DNS:Edit + Zone.Zone:Read;
+  secret `cloudflare-api-token-secret`** (least-privilege Zone.DNS:Edit + Zone.Zone:Read;
   referenced, **not inlined** — no token in this doc or the repo). It is **not**
   HTTP-01.
 - Consequence (INVERTED from the old Route 53 setup): the `skpodduturi.dev` Cloudflare
   zone is **net-new** to cert-manager, so issuance needs the **new
-  `letsencrypt-cloudflare` issuer + the `cloudflare-api-token` secret** in place first
+  `letsencrypt-cloudflare` issuer + the `cloudflare-api-token-secret` secret** in place first
   — it is **not** zero-config. Once they exist, each allpets host needs only the
   Ingress annotation + `tls` block. The flow is still DNS-01, so there is **no
   `/.well-known/acme-challenge` HTTP path** anywhere, and an HTTP→HTTPS redirect is
@@ -293,7 +293,7 @@ repoint). See `allpets-backend#131`.
   kubectl logs -n cert-manager deploy/cert-manager      # solver errors
   ```
   A challenge stuck `pending` usually means the `_acme-challenge` TXT has not
-  propagated yet, or the `cloudflare-api-token` secret lost Cloudflare DNS write
+  propagated yet, or the `cloudflare-api-token-secret` secret lost Cloudflare DNS write
   access (Zone.DNS:Edit on `skpodduturi.dev`).
 - **Verify the served cert end-to-end:**
   ```bash
