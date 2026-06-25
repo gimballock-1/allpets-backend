@@ -25,7 +25,12 @@ resources:
   # Epic 20.4 — dedicated Cloudflare DNS-01 ClusterIssuer (letsencrypt-cloudflare).
   # cloudflare-api-token is a Secret applied out-of-band (see cert-manager/kustomization.yaml).
   - cert-manager
-  # Epic 20.4 authors deploy/k8s/api/ingress.yaml (api.allpets.skpodduturi.dev) but it is
-  # intentionally NOT wired here yet: its backend Service (allpets-api) lands in 20.5, which
-  # adds the api/ Deployment+Service and folds the api/ dir in (Middleware/Service before
-  # the Ingress). Applying the Ingress now would dangle on the missing Service.
+  # Epic 20.5 — Spring backend on api.allpets.skpodduturi.dev. One `apply -k` applies
+  # the redirect-https Middleware and the api/ Ingress together (kustomize sorts output
+  # by kind, so order in this list is not an apply-order guarantee); Traefik resolves
+  # the `...-redirect-https@kubernetescrd` reference at request time, so the route
+  # self-heals within seconds if the Middleware lands second. The api/ dir bundles the
+  # Deployment + Service + Ingress; the real allpets-api-secret is applied out-of-band
+  # (see api/allpets-api-secret.example.yaml).
+  - ingress/redirect-https.yaml
+  - api

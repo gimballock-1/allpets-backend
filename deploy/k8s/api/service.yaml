@@ -1,0 +1,22 @@
+# allpets Spring backend — Service (issue 20.5)
+#
+# ClusterIP (internal only). Traefik reaches it via the api Ingress (ingress.yaml)
+# on 8080 — the port pinned in allow-traefik-ingress (networkpolicies/backend-database.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: allpets-api
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/name: allpets-api
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: allpets-api
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http

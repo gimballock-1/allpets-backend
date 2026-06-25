@@ -1,0 +1,120 @@
+# allpets Spring backend — Deployment (issue 20.5)
+#
+# The phase-1 Spring API (contact endpoint + reviews cache + health/metrics). Single
+# replica on the shared quasar node, sized within the 2.12 `allpets-backend` budget
+# (req 1500m/4Gi, lim 5/8Gi; LimitRange per-container max 3cpu/4Gi) so it leaves room
+# for Cal.com (6.x) + Plausible (11.x) in the same namespace.
+#
+# Image: built + pushed by CI (Epic 15.4) to GHCR; CD (push-based over Tailscale)
+# pins the immutable tag/@sha256 per deploy (GIT_SHA). `ghcr-pull` is the registry
+# pull Secret (Epic 15.6) — required if the GHCR package is private. The `:main`
+# tag below is the deployable placeholder until CI lands; do NOT treat it as pinned.
+#
+# Hardening (14.x): runs as a fixed non-root uid with a read-only root FS, all caps
+# dropped, no privilege escalation, RuntimeDefault seccomp. Only /tmp is writable
+# (embedded Tomcat work/upload dir) via an emptyDir. The image's JVM honours the
+# container memory limit (-XX:MaxRAMPercentage=75, deploy/Dockerfile.api).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: allpets-api
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/name: allpets-api
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: allpets-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: allpets-api
+        app.kubernetes.io/part-of: allpets
+        allpets.skpodduturi.dev/tier: backend
+    spec:
+      automountServiceAccountToken: false   # the app never calls the k8s API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001          # fixed numeric uid so the kubelet can verify non-root
+        runAsGroup: 10001         # (the image's USER is a name; a numeric id is required)
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: ghcr-pull         # Epic 15.6; no-op if the GHCR package is public
+      containers:
+        - name: allpets-api
+          image: ghcr.io/gimballock-1/allpets-api:main   # CI 15.4 builds; CD pins @sha256
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # appdb (owner role app_svc). The password lives in the allpets-backend
+            # Secret `allpets-api-secret` (own-namespace copy of the app_svc role pw;
+            # a workload cannot read the allpets-database `postgres-secret` across
+            # namespaces). URL/username are non-secret and set here directly.
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://postgres.allpets-database.svc.cluster.local:5432/appdb
+            - name: SPRING_DATASOURCE_USERNAME
+              value: app_svc
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: allpets-api-secret
+                  key: SPRING_DATASOURCE_PASSWORD
+            - name: ALLPETS_CORS_ALLOWED_ORIGINS
+              value: https://allpets.skpodduturi.dev
+            - name: JAVA_OPTS
+              # Override the Dockerfile's 75% default. At the 1.5Gi limit below, cap
+              # heap at 60% (~920Mi) so JVM non-heap (Metaspace + threads + code cache +
+              # direct buffers + GC — ~300-400Mi for Boot 3 + Flyway + Hibernate +
+              # Tomcat, with a startup Metaspace spike) fits under the limit without OOM.
+              value: "-XX:MaxRAMPercentage=60.0"
+            # GIT_SHA / BUILD_TIME are injected by CD per deploy (info endpoint).
+            # Mail (Epic 13) and the Google Places key (Epic 10) add their own
+            # secretKeyRef env here when those features land — keys are pre-shaped
+            # in allpets-api-secret.example.yaml.
+          startupProbe:
+            # JVM cold start: allow up to ~150s before liveness/readiness take over.
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          readinessProbe:
+            # readiness group includes `db` (application.yml) — flips UP only when
+            # appdb is reachable, so the Service routes only a DB-ready pod.
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          resources:
+            # Within the 2.12 allpets-backend budget (req 1500m/4Gi, lim 5/8Gi;
+            # LimitRange per-container max 3cpu/4Gi). The 1.5Gi limit sits above the
+            # ~920Mi heap (JAVA_OPTS) with room for JVM non-heap; the small request
+            # leaves the namespace request budget free for Cal.com (6.x) + Plausible (11.x).
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
