@@ -2,9 +2,9 @@
 #
 # Mirrors the AarogyaBackend strategy (same shared quasar node, Tailscale 100.108.60.90):
 # GitHub Actions builds + pushes the image to GHCR with the built-in GITHUB_TOKEN, then
-# connects Tailscale and deploys over SSH. Adapted for allpets: Gradle/Java build, the
-# api/ kustomize dir, and OUT-OF-BAND secrets (no in-manifest secret injection — the real
-# allpets-api-secret / ghcr-pull live on the cluster).
+# connects Tailscale and deploys over SSH. Hardened beyond the aarogya baseline (project
+# policy is to not inherit aarogya's regressions): SHA-pinned actions, host-key pinning,
+# persist-credentials off, a main-only deploy guard, and deploy preflight checks.
 #
 # Required GitHub repo secrets (Settings → Secrets and variables → Actions):
 #   TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_SECRET  — Tailscale OAuth client (tag:ci)
@@ -15,6 +15,10 @@
 #   - allpets-api-secret (SPRING_DATASOURCE_PASSWORD) in ns allpets-backend
 #   - ghcr-pull imagePullSecret in ns allpets-backend  (OR make the GHCR package public)
 #   - the letsencrypt-cloudflare ClusterIssuer + the api.allpets.skpodduturi.dev DNS record
+#
+# Further hardening (Epic 15): a dedicated namespace-scoped RBAC deploy ServiceAccount/
+# kubeconfig instead of sk's cluster-admin config; splitting build-push into its own job so
+# packages:write is scoped to that job only.
 name: CD
 
 on:
@@ -24,11 +28,13 @@ on:
       - 'src/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
+      - 'gradle.properties'
       - 'gradle/**'
       - 'gradlew'
       - 'deploy/Dockerfile.api'
       - 'deploy/k8s/api/**'
       - 'deploy/k8s/ingress/redirect-https.yaml'
+      - 'deploy/ci/known_hosts'
       - '.github/workflows/cd.yml'
   workflow_dispatch:
 
@@ -38,16 +44,21 @@ concurrency:
 
 jobs:
   deploy:
+    # Deploy ONLY reviewed main — a manual workflow_dispatch on any other ref is skipped
+    # (so an unreviewed branch can never be pushed to the production cluster).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false   # don't leave GITHUB_TOKEN in .git/config for build steps
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
           java-version: '25'
@@ -68,8 +79,10 @@ jobs:
           context: .
           file: deploy/Dockerfile.api
           push: true
+          # :main is the floating ref the committed Deployment placeholder uses (so the first
+          # `apply -k` pulls a real image); :<sha> is the immutable tag the deploy pins to.
           tags: |
-            ghcr.io/gimballock-1/allpets-api:latest
+            ghcr.io/gimballock-1/allpets-api:main
             ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
 
       - name: Connect to Tailscale
@@ -83,25 +96,35 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEV_SERVER_SSH_KEY }}
           IMAGE: ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
+          GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+          cp deploy/ci/known_hosts ~/.ssh/known_hosts   # pin quasar's host key (no TOFU)
           HOST=sk@100.108.60.90
-          SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-          # Ship only the manifests this workflow applies (api workload + the shared middleware).
+          SSHO="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          # Ship ONLY the manifests this workflow applies (api workload + the shared
+          # middleware) — never the *.example.yaml Secret template.
           ssh $SSHO "$HOST" 'mkdir -p ~/allpets-deploy/api ~/allpets-deploy/ingress'
-          scp $SSHO deploy/k8s/api/*.yaml "$HOST":~/allpets-deploy/api/
+          scp $SSHO deploy/k8s/api/kustomization.yaml deploy/k8s/api/deployment.yaml \
+                    deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml "$HOST":~/allpets-deploy/api/
           scp $SSHO deploy/k8s/ingress/redirect-https.yaml "$HOST":~/allpets-deploy/ingress/
-          ssh $SSHO "$HOST" "IMAGE='$IMAGE' bash -s" <<'REMOTE'
+          ssh $SSHO "$HOST" "IMAGE='$IMAGE' GIT_SHA='$GIT_SHA' BUILD_TIME='$BUILD_TIME' bash -s" <<'REMOTE'
           set -euo pipefail
           export KUBECONFIG=/home/sk/.kube/config
+          # Preflight: fail fast with a clear message instead of a 180s rollout timeout.
+          kubectl -n allpets-backend get secret allpets-api-secret >/dev/null 2>&1 \
+            || { echo "ERROR: allpets-api-secret missing in allpets-backend — create it first"; exit 1; }
+          kubectl -n allpets-backend get secret ghcr-pull >/dev/null 2>&1 \
+            || echo "WARNING: ghcr-pull not found — deploy will ImagePullBackOff unless the GHCR package is public"
           # NOT a whole-tree apply: the live cert-manager issuer + DB substrate must not be
-          # clobbered/rolled. Apply only the shared redirect-https Middleware + the api/ dir
-          # (Deployment/Service/Ingress; the example Secret is excluded by api/kustomization.yaml).
+          # clobbered/rolled. Apply only the shared redirect-https Middleware + the api/ dir.
           kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
           kubectl apply -k ~/allpets-deploy/api
+          kubectl -n allpets-backend set env deployment/allpets-api GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
           kubectl -n allpets-backend set image deployment/allpets-api allpets-api="$IMAGE"
           kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
           REMOTE
