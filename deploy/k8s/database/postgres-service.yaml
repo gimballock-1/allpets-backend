@@ -18,7 +18,7 @@ metadata:
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   type: ClusterIP
   selector:

@@ -6,8 +6,8 @@
 #   traefik.ingress.kubernetes.io/router.middlewares: <ns>-redirect-https@kubernetescrd
 #
 # WHY A REDIRECT IS SAFE HERE (do not "fix" this back to plaintext):
-#   TLS for the three allpets hosts is issued by cert-manager's DNS-01 solver
-#   (Route53 _acme-challenge TXT records — verified 2026-06-15). There is NO
+#   TLS for the allpets hosts is issued by cert-manager's DNS-01 solver
+#   (Cloudflare _acme-challenge TXT records in the skpodduturi.dev zone). There is NO
 #   HTTP /.well-known/acme-challenge path involved, so an HTTP->HTTPS redirect
 #   CANNOT break ACME. Port 80 is not even required for issuance. See README.md.
 #
@@ -16,7 +16,7 @@
 #   NOT set. A Middleware can therefore only be referenced by an Ingress in its
 #   OWN namespace. So this same object must be instantiated in EVERY allpets
 #   namespace that has a redirecting Ingress:
-#     - allpets-frontend  (for allpets.kinvee.in)  -> authored in the FRONTEND repo
+#     - allpets-frontend  (for allpets.skpodduturi.dev)  -> authored in the FRONTEND repo
 #     - allpets-backend   (for book + analytics)   -> authored in THIS repo
 #   The two backend hosts share one Middleware in allpets-backend; the frontend
 #   host needs its own copy in allpets-frontend (different repo).
@@ -39,13 +39,13 @@ metadata:
   namespace: allpets-backend
   labels:
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: backend
+    allpets.skpodduturi.dev/tier: backend
 spec:
   redirectScheme:
     scheme: https
     permanent: true   # emits 308 Permanent Redirect
 
-# --- allpets-frontend copy (serves allpets.kinvee.in) ---
+# --- allpets-frontend copy (serves allpets.skpodduturi.dev) ---
 # AUTHORED IN THE allpets-frontend REPO, not here — the allpets-frontend namespace
 # is owned there. Reproduced as a comment so the pattern is unambiguous; copy it
 # verbatim into allpets-frontend/deploy/k8s/ alongside the site Ingress:
@@ -57,7 +57,7 @@ spec:
 #     namespace: allpets-frontend
 #     labels:
 #       app.kubernetes.io/part-of: allpets
-#       allpets.kinvee.in/tier: frontend
+#       allpets.skpodduturi.dev/tier: frontend
 #   spec:
 #     redirectScheme:
 #       scheme: https

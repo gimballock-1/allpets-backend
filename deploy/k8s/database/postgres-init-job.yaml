@@ -31,7 +31,7 @@ metadata:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/component: init
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   backoffLimit: 4
   ttlSecondsAfterFinished: 86400
@@ -44,7 +44,7 @@ spec:
         app.kubernetes.io/name: postgres
         app.kubernetes.io/component: init
         app.kubernetes.io/part-of: allpets
-        allpets.kinvee.in/tier: database
+        allpets.skpodduturi.dev/tier: database
     spec:
       restartPolicy: OnFailure
       securityContext:

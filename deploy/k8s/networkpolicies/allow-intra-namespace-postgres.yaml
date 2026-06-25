@@ -35,7 +35,7 @@ metadata:
   namespace: allpets-database
   labels:
     app.kubernetes.io/part-of: allpets
-    allpets.kinvee.in/tier: database
+    allpets.skpodduturi.dev/tier: database
 spec:
   # Apply this allow only to the Postgres server pod.
   podSelector:
