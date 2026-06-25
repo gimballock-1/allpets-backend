@@ -1,0 +1,17 @@
+# allpets Spring backend — api workload (issue 20.5).
+#
+# Deployment + Service + the api.allpets.skpodduturi.dev Ingress (authored in 20.4).
+# Folded into the root kustomization once the Service exists (this PR).
+#
+# The runtime Secret (allpets-api-secret.example.yaml) is intentionally NOT included
+# — the real Secret is created out-of-band (see that template), matching the
+# database/*.example.yaml precedent. The `redirect-https` Middleware the Ingress
+# references is wired into the root kustomization (deploy/k8s/ingress/redirect-https.yaml);
+# Traefik resolves the reference at request time, so apply order doesn't matter.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml

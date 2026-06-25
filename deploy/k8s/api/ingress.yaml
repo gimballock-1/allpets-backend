@@ -1,21 +1,20 @@
-# allpets Spring backend — public host Ingress (issue 20.4)
+# allpets Spring backend — public host Ingress (issues 20.4 + 20.5)
 #
 # Realizes the canonical 3.4 per-host pattern (deploy/k8s/ingress/ingress-template.yaml,
 # deploy/k8s/ingress/README.md) for the Spring API host `api.allpets.skpodduturi.dev`:
 # traefik ingressClassName, dedicated `letsencrypt-cloudflare` DNS-01 issuer, the
 # `<host>-tls` secret, and the per-namespace `redirect-https` 308 Middleware.
 #
-# !!! NOT YET WIRED INTO deploy/k8s/kustomization.yaml !!!
-#   The backend Service (`allpets-api`) does not exist until 20.5. Applying this Ingress
-#   before the Service would give Traefik a dangling route (502/404). 20.5 adds the
-#   Deployment/Service under deploy/k8s/api/, then wires the whole api/ dir into the root
-#   kustomization with the `redirect-https` Middleware/Service ordered BEFORE this Ingress.
+# WIRED into kustomize via deploy/k8s/api/kustomization.yaml (20.5 added the
+# allpets-api Deployment + Service, so this Ingress no longer dangles). The
+# `redirect-https` Middleware (deploy/k8s/ingress/redirect-https.yaml) is applied by
+# the same `apply -k`; Traefik resolves the middleware reference at request time.
 #
-# APPLY-TIME dependencies (handled in 20.5 / the live cutover):
-#   - the `redirect-https` Middleware in ns allpets-backend
-#     (deploy/k8s/ingress/redirect-middleware.template.yaml).
+# LIVE-CUTOVER dependencies (NOT satisfied by `kubectl apply -k` alone):
 #   - the `letsencrypt-cloudflare` ClusterIssuer (deploy/k8s/cert-manager/) + the real
 #     `cloudflare-api-token` Secret + the `api.allpets.skpodduturi.dev` Cloudflare A-record.
+#   - the real `allpets-api-secret` (app_svc DB password) for the pod to start ready.
+#   - the GHCR image (CI 15.4) + the `ghcr-pull` Secret (15.6) if the package is private.
 #
 # CORS is enforced in Spring (com.allpets.api.config.CorsConfig), NOT here.
 apiVersion: networking.k8s.io/v1
@@ -42,8 +41,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: allpets-api      # 20.5: Spring Service (intended name; reconcile when authored)
+                name: allpets-api      # the Spring Service (deploy/k8s/api/service.yaml, 20.5)
                 port:
-                  number: 8080         # 20.5: Spring server.port. NOTE: allow-traefik-ingress
-                                       # (networkpolicies/backend-database.yaml) currently allows
-                                       # only 3000/8000 — 20.5 MUST add TCP 8080 or Traefik->pod is dropped.
+                  number: 8080         # Spring server.port; allowed in allow-traefik-ingress
+                                       # (networkpolicies/backend-database.yaml, added in 20.5).

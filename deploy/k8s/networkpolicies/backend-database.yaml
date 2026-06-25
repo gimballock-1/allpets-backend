@@ -44,24 +44,20 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability
----
-# Next.js (allpets-frontend) -> Payload / Cal.com / Plausible app (SSR + POST).
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-from-frontend
-  namespace: allpets-backend
-spec:
-  podSelector: {}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: allpets-frontend
+# NOTE: there is deliberately NO `allow-from-frontend` policy (the pre-pivot version was
+# removed in 20.5). The pivot dropped the old in-cluster Next.js -> Payload content-API
+# seam (content is now file-based) and put the Spring API on its OWN PUBLIC host: the
+# site's /api proxy server-side-fetches api.allpets.skpodduturi.dev THROUGH Traefik
+# (allow-traefik-ingress below, :8080), NOT over an allpets-frontend -> allpets-backend
+# pod path. So the frontend namespace needs no ingress allow here; re-adding one
+# (podSelector {}, all ports) would needlessly widen the blast radius onto the Spring
+# API + Cal.com + Plausible. See architecture.md ("site->API path is public, not
+# in-cluster") + lld-backend.md §netpol. Re-add a SCOPED allow only if the /api proxy is
+# ever re-pointed at an in-cluster Service URL instead of the public host.
 ---
 # Traefik (kube-system) -> backend services that ingress directly:
-# book.allpets -> Cal.com (3000), analytics.allpets -> Plausible (8000).
+# api.allpets -> Spring API (8080), book.allpets -> Cal.com (3000),
+# analytics.allpets -> Plausible (8000).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -76,6 +72,7 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
       ports:
+        - { protocol: TCP, port: 8080 }  # Spring API (20.5)
         - { protocol: TCP, port: 3000 }
         - { protocol: TCP, port: 8000 }
 

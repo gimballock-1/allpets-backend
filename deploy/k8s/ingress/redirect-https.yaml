@@ -1,0 +1,25 @@
+# allpets-backend HTTP->HTTPS redirect Middleware — REAL manifest (issues 3.4 / 20.5)
+#
+# Materialized from redirect-middleware.template.yaml (the allpets-backend copy).
+# Wired into deploy/k8s/kustomization.yaml. Ingresses reference it via:
+#   traefik.ingress.kubernetes.io/router.middlewares: allpets-backend-redirect-https@kubernetescrd
+# Traefik resolves that reference at request-routing time, so it need not be applied
+# before the Ingress — a one-shot `apply -k` self-heals within seconds.
+#
+# Shared by every allpets-backend host: api (20.5, now), book/Cal.com (6.3),
+# analytics/Plausible (11.1). allowCrossNamespace is OFF on this cluster, so this
+# object must live in allpets-backend (the frontend host carries its own copy in
+# the allpets-frontend repo). Safe with a 308 redirect: TLS is DNS-01, so there is
+# no /.well-known/acme-challenge HTTP path to clobber.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true   # emits 308 Permanent Redirect
