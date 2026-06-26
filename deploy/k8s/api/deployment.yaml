@@ -75,9 +75,22 @@ spec:
               # Tomcat, with a startup Metaspace spike) fits under the limit without OOM.
               value: "-XX:MaxRAMPercentage=60.0"
             # GIT_SHA / BUILD_TIME are injected by CD per deploy (info endpoint).
-            # Mail (Epic 13) and the Google Places key (Epic 10) add their own
-            # secretKeyRef env here when those features land — keys are pre-shaped
-            # in allpets-api-secret.example.yaml.
+            # --- Google Reviews (Epic 10) ---
+            # The API key is a Secret. optional:true so the pod still starts before the key
+            # is added to allpets-api-secret (10.2); until both key + place-id are set, the
+            # reviews refresh is a no-op and GET /reviews is typed-empty.
+            - name: GOOGLE_PLACES_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: allpets-api-secret
+                  key: GOOGLE_PLACES_API_KEY
+                  optional: true
+            # GOOGLE_PLACE_ID is NON-secret — uncomment and set it to the clinic's Place ID
+            # once recorded (10.1), then redeploy:
+            # - name: GOOGLE_PLACE_ID
+            #   value: "ChIJ..."
+            # Mail (Epic 13) adds its own secretKeyRef env here when that feature lands —
+            # keys are pre-shaped in allpets-api-secret.example.yaml.
           startupProbe:
             # JVM cold start: allow up to ~150s before liveness/readiness take over.
             httpGet: { path: /actuator/health/liveness, port: http }
