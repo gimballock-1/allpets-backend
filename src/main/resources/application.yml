@@ -75,3 +75,12 @@ allpets:
     # /api proxy origin; credentials are off. CORS is enforced in Spring (CorsConfig),
     # not at the ingress. Comma-separate for multiple origins.
     allowed-origins: ${ALLPETS_CORS_ALLOWED_ORIGINS:https://allpets.skpodduturi.dev}
+  reviews:
+    # Google Reviews cache (Epic 10). place-id is NON-secret (GOOGLE_PLACE_ID, 10.1);
+    # api-key is a SECRET (GOOGLE_PLACES_API_KEY, 10.2). Both empty until provided -> the
+    # scheduled refresh is a no-op and GET /reviews serves a typed-empty payload.
+    place-id: ${GOOGLE_PLACE_ID:}
+    api-key: ${GOOGLE_PLACES_API_KEY:}
+    # Daily refresh (Place Details bills per call; ~30/month stays in the free tier).
+    refresh-cron: ${REVIEWS_REFRESH_CRON:0 0 3 * * *}
+    timezone: ${REVIEWS_TIMEZONE:America/Chicago}
