@@ -53,4 +53,25 @@ class ReviewsCachePersistenceTest extends PostgresIntegrationTest {
         assertThat(ReviewsCache.singleton().getId()).isEqualTo(ReviewsCache.SINGLETON_ID);
         assertThat(repository.count()).isZero();
     }
+
+    @Test
+    void savingAFreshSingletonWhenTheRowExistsUpdatesInPlace() {
+        ReviewsCache first = ReviewsCache.singleton();
+        first.update(new BigDecimal("4.0"), 10, List.of(), OffsetDateTime.parse("2026-01-01T00:00:00Z"));
+        repository.save(first); // INSERT id=1
+
+        // A fresh singleton (id=1, assigned) saved while the row already exists must MERGE to an
+        // UPDATE, not a duplicate-key INSERT — this is the path orElseGet(singleton) can hit.
+        ReviewsCache second = ReviewsCache.singleton();
+        second.update(new BigDecimal("4.8"), 250,
+                List.of(new CachedReview("B", null, null, 5, "newer", "2026-06-01T00:00:00Z", "1 day ago")),
+                OffsetDateTime.parse("2026-06-25T00:00:00Z"));
+        repository.save(second);
+
+        assertThat(repository.count()).isEqualTo(1);
+        ReviewsCache loaded = repository.findById(ReviewsCache.SINGLETON_ID).orElseThrow();
+        assertThat(loaded.getAggregateRating()).isEqualByComparingTo("4.8");
+        assertThat(loaded.getRatingCount()).isEqualTo(250);
+        assertThat(loaded.getReviews()).hasSize(1);
+    }
 }

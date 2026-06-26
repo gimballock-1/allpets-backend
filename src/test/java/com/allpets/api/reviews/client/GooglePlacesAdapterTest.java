@@ -61,7 +61,7 @@ class GooglePlacesAdapterTest {
         assertThat(reviews).hasSize(5);                                    // clamped from 6
         assertThat(reviews.get(0).author()).isEqualTo("A1");
         assertThat(reviews.get(0).authorPhotoUri()).isEqualTo("p1");
-        assertThat(reviews.get(0).time()).isEqualTo("2026-06-10T14:21Z");
+        assertThat(reviews.get(0).time()).isEqualTo("2026-06-10T14:21:00Z"); // verbatim RFC3339
         assertThat(reviews.get(1).text()).isEqualTo("orig2");             // originalText fallback
         assertThat(reviews.get(2).author()).isNull();                     // null authorAttribution tolerated
         server.verify();

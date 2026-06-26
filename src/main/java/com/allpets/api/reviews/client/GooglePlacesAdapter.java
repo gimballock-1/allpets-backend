@@ -5,7 +5,6 @@ import com.allpets.api.reviews.domain.CachedReview;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.OffsetDateTime;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,7 +76,7 @@ class GooglePlacesAdapter implements GooglePlacesClient {
                 a != null ? a.photoUri() : null,
                 r.rating(),
                 text,
-                r.publishTime() != null ? r.publishTime().toString() : null,
+                r.publishTime(),
                 r.relativePublishTimeDescription());
     }
 
@@ -88,7 +87,7 @@ class GooglePlacesAdapter implements GooglePlacesClient {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     record ApiReview(Integer rating, LocalizedText text, LocalizedText originalText,
-                     OffsetDateTime publishTime, String relativePublishTimeDescription,
+                     String publishTime, String relativePublishTimeDescription,
                      AuthorAttribution authorAttribution) {
     }
 

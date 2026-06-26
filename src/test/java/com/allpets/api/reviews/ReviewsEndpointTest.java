@@ -1,6 +1,8 @@
 package com.allpets.api.reviews;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.allpets.api.reviews.client.GooglePlacesClient;
@@ -47,12 +49,14 @@ class ReviewsEndpointTest extends PostgresIntegrationTest {
 
     @Test
     void coldCacheReturnsTypedEmpty200WithCacheControl() {
+        clearInvocations(placesClient); // forget the startup refresh's fetch()
         ResponseEntity<Map> r = rest.getForEntity("/reviews", Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(r.getBody()).containsEntry("reviews", List.of());
         assertThat(r.getBody().get("aggregateRating")).isNull();
         assertThat(r.getHeaders().getCacheControl()).contains("max-age=300").contains("public");
+        verifyNoInteractions(placesClient); // the read path must NOT call Google
     }
 
     @Test
@@ -61,11 +65,13 @@ class ReviewsEndpointTest extends PostgresIntegrationTest {
                 List.of(new CachedReview("Jane D.", null, null, 5, "Great",
                         "2026-06-10T14:21:00Z", "2 weeks ago"))));
         service.refresh();
+        clearInvocations(placesClient); // forget the refresh's fetch()
 
         ResponseEntity<Map> r = rest.getForEntity("/reviews", Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(r.getBody().get("ratingCount")).isEqualTo(312);
+        verifyNoInteractions(placesClient); // served from cache, no live Google call
         assertThat(r.getBody().get("aggregateRating")).isEqualTo(4.7);
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> reviews = (List<Map<String, Object>>) r.getBody().get("reviews");
