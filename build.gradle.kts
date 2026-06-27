@@ -42,7 +42,7 @@ dependencies {
     // a separate throwaway Postgres service.
     testImplementation("io.zonky.test:embedded-postgres:2.1.0")
     // Match the prod server minor (postgres:16.4) so test behaviour mirrors prod.
-    testImplementation(platform("io.zonky.test.postgres:embedded-postgres-binaries-bom:16.4.0"))
+    testImplementation(platform("io.zonky.test.postgres:embedded-postgres-binaries-bom:18.4.0"))
 }
 
 // Expose method parameter names (cleaner Spring binding / validation messages).
