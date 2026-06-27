@@ -122,16 +122,17 @@ jobs:
             || echo "WARNING: ghcr-pull not found — deploy will ImagePullBackOff unless the GHCR package is public"
           # NOT a whole-tree apply: the live cert-manager issuer + DB substrate must not be
           # clobbered/rolled. Apply only the shared redirect-https Middleware + the api/ dir.
-          kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
-          kubectl apply -k ~/allpets-deploy/api
           # Atomic rollout with automatic rollback (15.10). Capture the last-good
-          # revision BEFORE changing anything: `set env` + `set image` create two
-          # intermediate revisions, so a plain `rollout undo` would only revert the
-          # last one — undo --to-revision targets the exact pre-deploy revision.
+          # revision BEFORE any change to the Deployment — the `apply -k` below resets
+          # the image to the :main placeholder (which this build just overwrote) and
+          # `set env`/`set image` add two more revisions, so rollback must target this
+          # captured pre-deploy revision (--to-revision), not a just-created one.
           NS=allpets-backend
           DEP=deployment/allpets-api
           REV_PATH='{.metadata.annotations.deployment\.kubernetes\.io/revision}'
           PREV_REV="$(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH" 2>/dev/null || true)"
+          kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
+          kubectl apply -k ~/allpets-deploy/api
           kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
           kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"
           if kubectl -n "$NS" rollout status "$DEP" --timeout=180s; then
