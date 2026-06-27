@@ -15,6 +15,16 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Spring Boot majors are upgraded deliberately (Boot 4 = Spring Framework 7 +
+      # Jakarta EE 11, breaking). Minor/patch within the current major still flow.
+      - dependency-name: "org.springframework.boot"
+        update-types:
+          - "version-update:semver-major"
+      # Pinned to match the production Postgres server minor (see build.gradle.kts:
+      # "Match the prod server minor so test behaviour mirrors prod"). Bump manually
+      # when the prod Postgres server is upgraded, not on Dependabot's schedule.
+      - dependency-name: "io.zonky.test.postgres:embedded-postgres-binaries-bom"
 
   - package-ecosystem: "github-actions"
     directory: "/"
