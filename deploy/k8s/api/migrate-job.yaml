@@ -1,0 +1,76 @@
+# allpets DB migration gate (issue 15.9) — runs Flyway from the SAME app image as a
+# one-shot Job BEFORE the Deployment is rolled.
+#
+# SPRING_PROFILES_ACTIVE=migrate boots a no-web context that runs Flyway + JPA validate
+# then exits (see MigrateRunner + the `migrate` profile in application.yml). CD renders
+# the immutable `:<sha>` image (replacing the `:main` placeholder below), runs this to
+# completion, and only THEN rolls the app — so a failed migration never reaches a
+# running pod, and (at >1 replica) replicas never race to migrate.
+#
+# NOT part of api/kustomization.yaml: Jobs are immutable, so CD deletes the prior run
+# and re-applies this each deploy rather than `apply -k`-ing it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: allpets-api-migrate
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/name: allpets-api-migrate
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+spec:
+  backoffLimit: 0                 # fail fast — a bad migration should not be retried
+  ttlSecondsAfterFinished: 600    # auto-clean 10 min after completion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: allpets-api-migrate
+        app.kubernetes.io/part-of: allpets
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: ghcr-pull         # Epic 15.6; no-op if the GHCR package is public
+      containers:
+        - name: migrate
+          image: ghcr.io/gimballock-1/allpets-api:main   # CD replaces :main with the @sha tag
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: migrate
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://postgres.allpets-database.svc.cluster.local:5432/appdb
+            - name: SPRING_DATASOURCE_USERNAME
+              value: app_svc
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: allpets-api-secret
+                  key: SPRING_DATASOURCE_PASSWORD
+            - name: JAVA_OPTS
+              value: "-XX:MaxRAMPercentage=60.0"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1024Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
