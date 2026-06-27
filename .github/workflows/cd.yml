@@ -110,7 +110,8 @@ jobs:
           # middleware) — never the *.example.yaml Secret template.
           ssh $SSHO "$HOST" 'mkdir -p ~/allpets-deploy/api ~/allpets-deploy/ingress'
           scp $SSHO deploy/k8s/api/kustomization.yaml deploy/k8s/api/deployment.yaml \
-                    deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml "$HOST":~/allpets-deploy/api/
+                    deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml \
+                    deploy/k8s/api/migrate-job.yaml "$HOST":~/allpets-deploy/api/
           scp $SSHO deploy/k8s/ingress/redirect-https.yaml "$HOST":~/allpets-deploy/ingress/
           ssh $SSHO "$HOST" "IMAGE='$IMAGE' GIT_SHA='$GIT_SHA' BUILD_TIME='$BUILD_TIME' bash -s" <<'REMOTE'
           set -euo pipefail
@@ -132,6 +133,36 @@ jobs:
           REV_PATH='{.metadata.annotations.deployment\.kubernetes\.io/revision}'
           PREV_REV="$(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH" 2>/dev/null || true)"
           kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
+          # --- Migration gate (15.9): run Flyway from the NEW image as a one-shot Job and
+          # wait for it BEFORE rolling the app, so a failed migration never reaches a pod
+          # (and, at >1 replica, replicas never race to migrate). Jobs are immutable, so
+          # delete the prior run, then render this build's image into the manifest.
+          sed "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/migrate-job.yaml > /tmp/allpets-migrate-job.yaml
+          kubectl -n "$NS" delete job allpets-api-migrate --ignore-not-found --wait=true
+          kubectl -n "$NS" apply -f /tmp/allpets-migrate-job.yaml
+          echo "Waiting for the DB migration job to complete…"
+          MIG_DEADLINE=$((SECONDS + 180))
+          while :; do
+            SUCC="$(kubectl -n "$NS" get job allpets-api-migrate -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+            FAIL="$(kubectl -n "$NS" get job allpets-api-migrate -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+            if [ "${SUCC:-0}" = "1" ]; then echo "Migration job complete."; break; fi
+            if [ -n "${FAIL:-}" ] && [ "${FAIL:-0}" -ge 1 ] 2>/dev/null; then
+              echo "::error::DB migration job failed — aborting deploy (app NOT rolled)"
+              kubectl -n "$NS" logs job/allpets-api-migrate --tail=60 || true
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$MIG_DEADLINE" ]; then
+              echo "::error::DB migration job did not finish within 180s — aborting"
+              kubectl -n "$NS" logs job/allpets-api-migrate --tail=60 || true
+              exit 1
+            fi
+            sleep 4
+          done
+          kubectl -n "$NS" logs job/allpets-api-migrate --tail=20 || true
+          # Pin the immutable :sha into the manifest BEFORE apply -k so the Deployment never
+          # rolls through the mutable :main placeholder (which IfNotPresent could resolve to a
+          # node's stale cached :main, briefly running old code against the just-migrated DB).
+          sed -i "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/deployment.yaml
           kubectl apply -k ~/allpets-deploy/api
           kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
           kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"
