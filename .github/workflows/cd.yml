@@ -159,6 +159,10 @@ jobs:
             sleep 4
           done
           kubectl -n "$NS" logs job/allpets-api-migrate --tail=20 || true
+          # Pin the immutable :sha into the manifest BEFORE apply -k so the Deployment never
+          # rolls through the mutable :main placeholder (which IfNotPresent could resolve to a
+          # node's stale cached :main, briefly running old code against the just-migrated DB).
+          sed -i "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/deployment.yaml
           kubectl apply -k ~/allpets-deploy/api
           kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
           kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"

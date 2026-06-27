@@ -62,7 +62,10 @@ spec:
               memory: 384Mi
             limits:
               cpu: "1"
-              memory: 1024Mi
+              # Matches the app Deployment: enough headroom for a full Boot 4 / JPA /
+              # Flyway context startup so a JVM spike can't false-fail the gate (it fails
+              # closed — the app is not rolled — but a flaky gate would block deploys).
+              memory: 1536Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
