@@ -122,9 +122,30 @@ jobs:
             || echo "WARNING: ghcr-pull not found — deploy will ImagePullBackOff unless the GHCR package is public"
           # NOT a whole-tree apply: the live cert-manager issuer + DB substrate must not be
           # clobbered/rolled. Apply only the shared redirect-https Middleware + the api/ dir.
+          # Atomic rollout with automatic rollback (15.10). Capture the last-good
+          # revision BEFORE any change to the Deployment — the `apply -k` below resets
+          # the image to the :main placeholder (which this build just overwrote) and
+          # `set env`/`set image` add two more revisions, so rollback must target this
+          # captured pre-deploy revision (--to-revision), not a just-created one.
+          NS=allpets-backend
+          DEP=deployment/allpets-api
+          REV_PATH='{.metadata.annotations.deployment\.kubernetes\.io/revision}'
+          PREV_REV="$(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH" 2>/dev/null || true)"
           kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
           kubectl apply -k ~/allpets-deploy/api
-          kubectl -n allpets-backend set env deployment/allpets-api GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
-          kubectl -n allpets-backend set image deployment/allpets-api allpets-api="$IMAGE"
-          kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
+          kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
+          kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"
+          if kubectl -n "$NS" rollout status "$DEP" --timeout=180s; then
+            echo "Rollout healthy (revision $(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH"), image $IMAGE)."
+          else
+            echo "::error::allpets-api rollout failed to become healthy — rolling back to revision ${PREV_REV:-previous}"
+            if [ -n "$PREV_REV" ]; then
+              kubectl -n "$NS" rollout undo "$DEP" --to-revision="$PREV_REV"
+            else
+              kubectl -n "$NS" rollout undo "$DEP"
+            fi
+            kubectl -n "$NS" rollout status "$DEP" --timeout=120s \
+              || echo "::warning::rollback did not confirm healthy within 120s — manual intervention needed"
+            exit 1
+          fi
           REMOTE
