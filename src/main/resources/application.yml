@@ -84,3 +84,17 @@ allpets:
     # Daily refresh (Place Details bills per call; ~30/month stays in the free tier).
     refresh-cron: ${REVIEWS_REFRESH_CRON:0 0 3 * * *}
     timezone: ${REVIEWS_TIMEZONE:America/Chicago}
+
+---
+# `migrate` profile — deploy-time migration gate (issue 15.9). The CD pipeline runs the
+# app image as a one-shot Job with SPRING_PROFILES_ACTIVE=migrate BEFORE rolling the
+# Deployment: Flyway migrates, JPA validate checks the schema, then MigrateRunner exits.
+# No web server is needed for that, so disable it (faster start, no port bind). Flyway
+# stays enabled here (it is the migrator); the running Deployment sets
+# SPRING_FLYWAY_ENABLED=false so the Job is the single migration authority.
+spring:
+  config:
+    activate:
+      on-profile: migrate
+  main:
+    web-application-type: none

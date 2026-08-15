@@ -11,6 +11,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# NOTE: the app runs with Flyway disabled (SPRING_FLYWAY_ENABLED=false) — migrations are
+# applied by the pre-deploy migrate Job (migrate-job.yaml, issue 15.9), which CD runs and
+# waits on BEFORE this apply. A manual `kubectl apply -k` here skips that gate and would
+# roll the app (validate-only) against a possibly-unmigrated schema — run migrate-job.yaml
+# first. The Job is intentionally NOT a resource here: Jobs are immutable, so CD deletes +
+# re-applies it each deploy rather than `apply -k`-ing it.
 resources:
   - deployment.yaml
   - service.yaml

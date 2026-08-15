@@ -17,10 +17,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.web.client.RestClient;
 
 /**
  * Exercises {@code POST /contact} over real HTTP against a real Postgres: validation,
@@ -29,8 +32,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ContactEndpointTest extends PostgresIntegrationTest {
 
-    @Autowired
-    private TestRestTemplate rest;
+    @LocalServerPort
+    private int port;
+
+    private RestClient rest;
 
     @Autowired
     private ContactSubmissionRepository repository;
@@ -42,7 +47,13 @@ class ContactEndpointTest extends PostgresIntegrationTest {
     private RateLimiter rateLimiter;       // drive the limit decision
 
     @BeforeEach
-    void allowByDefault() {
+    void setUp() {
+        // RestClient bound to the random port; do not throw on 4xx/5xx so error
+        // responses can be asserted the same way TestRestTemplate allowed.
+        rest = RestClient.builder()
+                .baseUrl("http://localhost:" + port)
+                .defaultStatusHandler(HttpStatusCode::isError, (req, res) -> { })
+                .build();
         when(rateLimiter.tryAcquire(any())).thenReturn(true);
     }
 
@@ -50,9 +61,10 @@ class ContactEndpointTest extends PostgresIntegrationTest {
     void validSubmissionPersistsAndNotifies() {
         long before = repository.count();
 
-        ResponseEntity<Map> r = rest.postForEntity("/contact",
-                Map.of("name", "Jamie", "email", "jamie@example.com", "message", "New patient?"),
-                Map.class);
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "Jamie", "email", "jamie@example.com", "message", "New patient?"))
+                .retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(r.getBody()).containsEntry("status", "received");
@@ -64,9 +76,10 @@ class ContactEndpointTest extends PostgresIntegrationTest {
     void invalidInputReturns400WithFieldErrors() {
         long before = repository.count();
 
-        ResponseEntity<Map> r = rest.postForEntity("/contact",
-                Map.of("name", "", "email", "not-an-email", "message", ""),
-                Map.class);
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "", "email", "not-an-email", "message", ""))
+                .retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(r.getBody()).containsEntry("status", "invalid");
@@ -81,9 +94,10 @@ class ContactEndpointTest extends PostgresIntegrationTest {
     void honeypotIsSilentlyDropped() {
         long before = repository.count();
 
-        ResponseEntity<Map> r = rest.postForEntity("/contact",
-                Map.of("name", "Bot", "email", "bot@example.com", "message", "spam", "website", "http://spam.example"),
-                Map.class);
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "Bot", "email", "bot@example.com", "message", "spam", "website", "http://spam.example"))
+                .retrieve().toEntity(Map.class);
 
         // Same success shape as a real submission, but nothing persisted / no email.
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
@@ -98,9 +112,10 @@ class ContactEndpointTest extends PostgresIntegrationTest {
         doThrow(new RuntimeException("smtp down")).when(emailNotifier).sendContactNotification(any());
         long before = repository.count();
 
-        ResponseEntity<Map> r = rest.postForEntity("/contact",
-                Map.of("name", "Jamie", "email", "jamie@example.com", "message", "still saved?"),
-                Map.class);
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "Jamie", "email", "jamie@example.com", "message", "still saved?"))
+                .retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(repository.count()).isEqualTo(before + 1);   // persisted despite the send failure
@@ -111,9 +126,10 @@ class ContactEndpointTest extends PostgresIntegrationTest {
         when(rateLimiter.tryAcquire(any())).thenReturn(false);
         long before = repository.count();
 
-        ResponseEntity<Map> r = rest.postForEntity("/contact",
-                Map.of("name", "Jamie", "email", "jamie@example.com", "message", "hello"),
-                Map.class);
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "Jamie", "email", "jamie@example.com", "message", "hello"))
+                .retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
         assertThat(r.getHeaders().getFirst("Retry-After")).isEqualTo("60");

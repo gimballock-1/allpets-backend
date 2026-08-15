@@ -18,10 +18,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.web.client.RestClient;
 
 /**
  * {@code GET /reviews} over real HTTP: a cold cache returns a typed-empty 200 (never 5xx);
@@ -30,8 +32,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ReviewsEndpointTest extends PostgresIntegrationTest {
 
-    @Autowired
-    private TestRestTemplate rest;
+    @LocalServerPort
+    private int port;
+
+    private RestClient rest;
 
     @Autowired
     private ReviewsService service;
@@ -44,13 +48,17 @@ class ReviewsEndpointTest extends PostgresIntegrationTest {
 
     @BeforeEach
     void clean() {
+        rest = RestClient.builder()
+                .baseUrl("http://localhost:" + port)
+                .defaultStatusHandler(HttpStatusCode::isError, (req, res) -> { })
+                .build();
         repository.deleteAll();
     }
 
     @Test
     void coldCacheReturnsTypedEmpty200WithCacheControl() {
         clearInvocations(placesClient); // forget the startup refresh's fetch()
-        ResponseEntity<Map> r = rest.getForEntity("/reviews", Map.class);
+        ResponseEntity<Map> r = rest.get().uri("/reviews").retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(r.getBody()).containsEntry("reviews", List.of());
@@ -67,7 +75,7 @@ class ReviewsEndpointTest extends PostgresIntegrationTest {
         service.refresh();
         clearInvocations(placesClient); // forget the refresh's fetch()
 
-        ResponseEntity<Map> r = rest.getForEntity("/reviews", Map.class);
+        ResponseEntity<Map> r = rest.get().uri("/reviews").retrieve().toEntity(Map.class);
 
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(r.getBody().get("ratingCount")).isEqualTo(312);

@@ -3,16 +3,16 @@ package com.allpets.api.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.allpets.api.support.PostgresIntegrationTest;
-import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.http.HttpEntity;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.RestClient;
 
 /**
  * Verifies the 20.4 CORS allowlist over real HTTP: a browser preflight from the site
@@ -24,8 +24,18 @@ class CorsConfigTest extends PostgresIntegrationTest {
 
     private static final String SITE_ORIGIN = "https://allpets.skpodduturi.dev";
 
-    @Autowired
-    private TestRestTemplate rest;
+    @LocalServerPort
+    private int port;
+
+    private RestClient rest;
+
+    @BeforeEach
+    void setUp() {
+        rest = RestClient.builder()
+                .baseUrl("http://localhost:" + port)
+                .defaultStatusHandler(HttpStatusCode::isError, (req, res) -> { })
+                .build();
+    }
 
     @Test
     void preflightFromSiteOriginIsAllowed() {
@@ -47,10 +57,10 @@ class CorsConfigTest extends PostgresIntegrationTest {
 
     /** A CORS preflight: OPTIONS carrying Origin + Access-Control-Request-Method. */
     private ResponseEntity<String> preflight(String origin) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setOrigin(origin);
-        headers.setAccessControlRequestMethod(HttpMethod.POST);
-        headers.setAccessControlRequestHeaders(List.of("Content-Type"));
-        return rest.exchange("/contact", HttpMethod.OPTIONS, new HttpEntity<>(headers), String.class);
+        return rest.method(HttpMethod.OPTIONS).uri("/contact")
+                .header(HttpHeaders.ORIGIN, origin)
+                .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, HttpMethod.POST.name())
+                .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "Content-Type")
+                .retrieve().toEntity(String.class);
     }
 }

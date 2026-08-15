@@ -1,6 +1,6 @@
 plugins {
     java
-    id("org.springframework.boot") version "3.5.15"
+    id("org.springframework.boot") version "4.1.0"
     id("io.spring.dependency-management") version "1.1.7"
 }
 
@@ -28,7 +28,10 @@ dependencies {
 
     // Persistence (20.2): JPA + Flyway-managed Postgres schema. Mail is Epic 13.
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
-    implementation("org.flywaydb:flyway-core")
+    // Spring Boot 4 split Flyway auto-configuration into its own module; the starter
+    // pulls flyway-core + the Boot integration so migrations run on startup (bare
+    // flyway-core no longer triggers auto-config, leaving the schema un-migrated).
+    implementation("org.springframework.boot:spring-boot-starter-flyway")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
 
@@ -40,7 +43,7 @@ dependencies {
     // Real Postgres for tests without Docker (native binary): verifies Flyway
     // migrations + JPA `validate` mapping end-to-end. CI's drift guard (15.4) uses
     // a separate throwaway Postgres service.
-    testImplementation("io.zonky.test:embedded-postgres:2.1.0")
+    testImplementation("io.zonky.test:embedded-postgres:2.2.2")
     // Match the prod server minor (postgres:16.4) so test behaviour mirrors prod.
     testImplementation(platform("io.zonky.test.postgres:embedded-postgres-binaries-bom:16.4.0"))
 }

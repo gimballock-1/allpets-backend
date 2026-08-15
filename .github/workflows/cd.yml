@@ -53,12 +53,12 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false   # don't leave GITHUB_TOKEN in .git/config for build steps
 
       - name: Set up JDK 25
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
         with:
           distribution: temurin
           java-version: '25'
@@ -67,14 +67,14 @@ jobs:
         run: ./gradlew --no-daemon test
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: deploy/Dockerfile.api
@@ -86,7 +86,7 @@ jobs:
             ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
 
       - name: Connect to Tailscale
-        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
@@ -110,7 +110,8 @@ jobs:
           # middleware) — never the *.example.yaml Secret template.
           ssh $SSHO "$HOST" 'mkdir -p ~/allpets-deploy/api ~/allpets-deploy/ingress'
           scp $SSHO deploy/k8s/api/kustomization.yaml deploy/k8s/api/deployment.yaml \
-                    deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml "$HOST":~/allpets-deploy/api/
+                    deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml \
+                    deploy/k8s/api/migrate-job.yaml "$HOST":~/allpets-deploy/api/
           scp $SSHO deploy/k8s/ingress/redirect-https.yaml "$HOST":~/allpets-deploy/ingress/
           ssh $SSHO "$HOST" "IMAGE='$IMAGE' GIT_SHA='$GIT_SHA' BUILD_TIME='$BUILD_TIME' bash -s" <<'REMOTE'
           set -euo pipefail
@@ -122,9 +123,60 @@ jobs:
             || echo "WARNING: ghcr-pull not found — deploy will ImagePullBackOff unless the GHCR package is public"
           # NOT a whole-tree apply: the live cert-manager issuer + DB substrate must not be
           # clobbered/rolled. Apply only the shared redirect-https Middleware + the api/ dir.
+          # Atomic rollout with automatic rollback (15.10). Capture the last-good
+          # revision BEFORE any change to the Deployment — the `apply -k` below resets
+          # the image to the :main placeholder (which this build just overwrote) and
+          # `set env`/`set image` add two more revisions, so rollback must target this
+          # captured pre-deploy revision (--to-revision), not a just-created one.
+          NS=allpets-backend
+          DEP=deployment/allpets-api
+          REV_PATH='{.metadata.annotations.deployment\.kubernetes\.io/revision}'
+          PREV_REV="$(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH" 2>/dev/null || true)"
           kubectl apply -f ~/allpets-deploy/ingress/redirect-https.yaml
+          # --- Migration gate (15.9): run Flyway from the NEW image as a one-shot Job and
+          # wait for it BEFORE rolling the app, so a failed migration never reaches a pod
+          # (and, at >1 replica, replicas never race to migrate). Jobs are immutable, so
+          # delete the prior run, then render this build's image into the manifest.
+          sed "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/migrate-job.yaml > /tmp/allpets-migrate-job.yaml
+          kubectl -n "$NS" delete job allpets-api-migrate --ignore-not-found --wait=true
+          kubectl -n "$NS" apply -f /tmp/allpets-migrate-job.yaml
+          echo "Waiting for the DB migration job to complete…"
+          MIG_DEADLINE=$((SECONDS + 180))
+          while :; do
+            SUCC="$(kubectl -n "$NS" get job allpets-api-migrate -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+            FAIL="$(kubectl -n "$NS" get job allpets-api-migrate -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+            if [ "${SUCC:-0}" = "1" ]; then echo "Migration job complete."; break; fi
+            if [ -n "${FAIL:-}" ] && [ "${FAIL:-0}" -ge 1 ] 2>/dev/null; then
+              echo "::error::DB migration job failed — aborting deploy (app NOT rolled)"
+              kubectl -n "$NS" logs job/allpets-api-migrate --tail=60 || true
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$MIG_DEADLINE" ]; then
+              echo "::error::DB migration job did not finish within 180s — aborting"
+              kubectl -n "$NS" logs job/allpets-api-migrate --tail=60 || true
+              exit 1
+            fi
+            sleep 4
+          done
+          kubectl -n "$NS" logs job/allpets-api-migrate --tail=20 || true
+          # Pin the immutable :sha into the manifest BEFORE apply -k so the Deployment never
+          # rolls through the mutable :main placeholder (which IfNotPresent could resolve to a
+          # node's stale cached :main, briefly running old code against the just-migrated DB).
+          sed -i "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/deployment.yaml
           kubectl apply -k ~/allpets-deploy/api
-          kubectl -n allpets-backend set env deployment/allpets-api GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
-          kubectl -n allpets-backend set image deployment/allpets-api allpets-api="$IMAGE"
-          kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
+          kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
+          kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"
+          if kubectl -n "$NS" rollout status "$DEP" --timeout=180s; then
+            echo "Rollout healthy (revision $(kubectl -n "$NS" get "$DEP" -o jsonpath="$REV_PATH"), image $IMAGE)."
+          else
+            echo "::error::allpets-api rollout failed to become healthy — rolling back to revision ${PREV_REV:-previous}"
+            if [ -n "$PREV_REV" ]; then
+              kubectl -n "$NS" rollout undo "$DEP" --to-revision="$PREV_REV"
+            else
+              kubectl -n "$NS" rollout undo "$DEP"
+            fi
+            kubectl -n "$NS" rollout status "$DEP" --timeout=120s \
+              || echo "::warning::rollback did not confirm healthy within 120s — manual intervention needed"
+            exit 1
+          fi
           REMOTE
