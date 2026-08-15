@@ -14,7 +14,7 @@
 # Cluster prerequisites (one-time, out-of-band):
 #   - allpets-api-secret (SPRING_DATASOURCE_PASSWORD) in ns allpets-backend
 #   - ghcr-pull imagePullSecret in ns allpets-backend  (OR make the GHCR package public)
-#   - the letsencrypt-cloudflare ClusterIssuer + the api.allpets.skpodduturi.dev DNS record
+#   - the letsencrypt-cloudflare ClusterIssuer + the api-allpets.skpodduturi.dev DNS record
 #
 # Further hardening (Epic 15): a dedicated namespace-scoped RBAC deploy ServiceAccount/
 # kubeconfig instead of sk's cluster-admin config; splitting build-push into its own job so

@@ -47,7 +47,7 @@ spec:
 # NOTE: there is deliberately NO `allow-from-frontend` policy (the pre-pivot version was
 # removed in 20.5). The pivot dropped the old in-cluster Next.js -> Payload content-API
 # seam (content is now file-based) and put the Spring API on its OWN PUBLIC host: the
-# site's /api proxy server-side-fetches api.allpets.skpodduturi.dev THROUGH Traefik
+# site's /api proxy server-side-fetches api-allpets.skpodduturi.dev THROUGH Traefik
 # (allow-traefik-ingress below, :8080), NOT over an allpets-frontend -> allpets-backend
 # pod path. So the frontend namespace needs no ingress allow here; re-adding one
 # (podSelector {}, all ports) would needlessly widen the blast radius onto the Spring
