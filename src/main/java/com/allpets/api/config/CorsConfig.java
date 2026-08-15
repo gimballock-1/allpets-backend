@@ -7,7 +7,7 @@ import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * CORS allowlist for the public API host ({@code api.allpets.skpodduturi.dev}) — 20.4.
+ * CORS allowlist for the public API host ({@code api-allpets.skpodduturi.dev}) — 20.4.
  *
  * <p>In the happy path the browser never calls this host directly: the Next.js site
  * reaches the API through its own same-origin {@code /api} route-handler proxy whose

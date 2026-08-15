@@ -1,6 +1,6 @@
 # allpets Spring backend — api workload (issue 20.5).
 #
-# Deployment + Service + the api.allpets.skpodduturi.dev Ingress (authored in 20.4).
+# Deployment + Service + the api-allpets.skpodduturi.dev Ingress (authored in 20.4).
 # Folded into the root kustomization once the Service exists (this PR).
 #
 # The runtime Secret (allpets-api-secret.example.yaml) is intentionally NOT included
