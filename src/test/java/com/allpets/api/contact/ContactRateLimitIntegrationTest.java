@@ -35,7 +35,7 @@ import org.springframework.web.client.RestClient;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ContactRateLimitIntegrationTest extends PostgresIntegrationTest {
 
-    private static final String PROXY_EGRESS = "10.42.0.9";   // in-cluster Next.js proxy hop
+    private static final String PROXY_EGRESS = "10.42.0.188";   // the site proxy pod (verified on quasar)
 
     @LocalServerPort
     private int port;
@@ -140,5 +140,25 @@ class ContactRateLimitIntegrationTest extends PostgresIntegrationTest {
         ResponseEntity<Map> limited = post(client, validBody("real message"));
         assertThat(limited.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
         assertThat(repository.count()).isEqualTo(before);
+    }
+
+    @Test
+    void malformedJsonConsumesBudgetBecauseTheLimiterRunsBeforeBodyParsing() {
+        // Codex P2-4: the limit is enforced in an interceptor BEFORE @RequestBody
+        // deserialization, so a bot flooding garbage cannot dodge the limiter.
+        String client = "203.0.113.40, " + PROXY_EGRESS;
+
+        for (int i = 1; i <= 5; i++) {
+            ResponseEntity<Map> bad = rest.post().uri("/contact")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header("X-Forwarded-For", client)
+                    .body("{not json")
+                    .retrieve().toEntity(Map.class);
+            assertThat(bad.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+
+        ResponseEntity<Map> limited = post(client, validBody("now a real one"));
+        assertThat(limited.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(limited.getHeaders().getFirst("Retry-After")).isNotNull();
     }
 }

@@ -3,18 +3,21 @@ package com.allpets.api.common.web;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.allpets.api.common.web.RateLimiter.Decision;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Instant;
 import java.time.InstantSource;
 import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for the hand-rolled sliding-window limiter (14.2): 5/minute AND 30/hour per
- * IP, honest {@code Retry-After}, per-IP isolation, and a bounded key map.
+ * bucket, honest {@code Retry-After} (max over violated windows), per-bucket isolation,
+ * IPv6 /64 key aggregation, and a bounded key map with saturation metrics.
  */
 class SlidingWindowRateLimiterTest {
 
     private static final int PER_MINUTE = 5;
     private static final int PER_HOUR = 30;
+    private static final int IPV6_PREFIX = 64;
 
     /** Deterministic, manually-advanced clock. */
     private static final class MutableClock implements InstantSource {
@@ -36,8 +39,9 @@ class SlidingWindowRateLimiterTest {
     }
 
     private final MutableClock clock = new MutableClock();
-    private final SlidingWindowRateLimiter limiter =
-            new SlidingWindowRateLimiter(PER_MINUTE, PER_HOUR, 10_000, clock);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final SlidingWindowRateLimiter limiter = new SlidingWindowRateLimiter(
+            PER_MINUTE, PER_HOUR, 10_000, IPV6_PREFIX, meterRegistry, clock);
 
     @Test
     void sixthRequestWithinAMinuteIsDeniedWithRetryAfter() {
@@ -113,6 +117,40 @@ class SlidingWindowRateLimiterTest {
     }
 
     @Test
+    void retryAfterCoversTheMinuteWindowWhenBothWindowsAreSaturated() {
+        // Regression (Codex P2-3): 25 hits early, then the last 5 just before the hour
+        // window starts freeing. The hour window frees in 1s, the minute window in 56s —
+        // Retry-After must report the LATER recovery, not the hourly one.
+        for (int burst = 0; burst < 5; burst++) {
+            for (int i = 0; i < PER_MINUTE; i++) {
+                assertThat(limiter.tryAcquire("203.0.113.7").allowed()).isTrue();
+            }
+            clock.advanceMillis(61_000);
+        }
+        clock.advanceMillis(3_290_000);   // t = 3595s; first burst ages out at t = 3600s
+        for (int i = 0; i < PER_MINUTE; i++) {
+            assertThat(limiter.tryAcquire("203.0.113.7").allowed()).isTrue();
+            if (i < PER_MINUTE - 1) {
+                clock.advanceMillis(1_000);
+            }
+        }
+        // t = 3599s: 30 in the hour (violated, frees in 1s), 5 in the minute (violated,
+        // frees in 56s).
+        Decision denied = limiter.tryAcquire("203.0.113.7");
+        assertThat(denied.allowed()).isFalse();
+        assertThat(denied.retryAfterSeconds()).isEqualTo(56L);
+
+        // Two seconds later the hour window HAS freed — the minute window must still deny.
+        clock.advanceMillis(2_000);
+        Decision stillDenied = limiter.tryAcquire("203.0.113.7");
+        assertThat(stillDenied.allowed()).isFalse();
+        assertThat(stillDenied.retryAfterSeconds()).isEqualTo(54L);
+
+        clock.advanceMillis(54_000);
+        assertThat(limiter.tryAcquire("203.0.113.7").allowed()).isTrue();
+    }
+
+    @Test
     void retryAfterIsAtLeastOneSecond() {
         for (int i = 0; i < PER_MINUTE; i++) {
             limiter.tryAcquire("203.0.113.7");
@@ -126,15 +164,43 @@ class SlidingWindowRateLimiterTest {
     }
 
     @Test
-    void keyMapIsBoundedByLruEviction() {
-        SlidingWindowRateLimiter bounded = new SlidingWindowRateLimiter(5, 30, 3, clock);
+    void twoAddressesInOneIpv6Slash64ShareABucket() {
+        // Regression (Codex P2-2): a bot rotating through its delegated /64 must not get
+        // a fresh budget per address.
+        for (int i = 0; i < PER_MINUTE; i++) {
+            assertThat(limiter.tryAcquire("2001:db8:1:2::" + (i + 1)).allowed()).isTrue();
+        }
+
+        Decision denied = limiter.tryAcquire("2001:db8:1:2:ffff:ffff:ffff:ffff");
+
+        assertThat(denied.allowed()).isFalse();
+    }
+
+    @Test
+    void differentIpv6Slash64GetsItsOwnBucket() {
+        for (int i = 0; i < PER_MINUTE; i++) {
+            limiter.tryAcquire("2001:db8:1:2::1");
+        }
+        assertThat(limiter.tryAcquire("2001:db8:1:2::2").allowed()).isFalse();
+
+        assertThat(limiter.tryAcquire("2001:db8:1:3::1").allowed()).isTrue();
+    }
+
+    @Test
+    void keyMapIsBoundedByLruEvictionAndCountsEvictions() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        SlidingWindowRateLimiter bounded =
+                new SlidingWindowRateLimiter(5, 30, 3, IPV6_PREFIX, registry, clock);
 
         for (int i = 0; i < 10; i++) {
             bounded.tryAcquire("203.0.113." + i);
         }
 
         assertThat(bounded.trackedIpCount()).isEqualTo(3);
-        // Evicted-and-back IP simply starts a fresh budget (permissive on eviction).
+        // Saturation is observable: 10 inserts over a cap of 3 -> 7 evictions.
+        assertThat(registry.get("allpets.ratelimit.evictions").counter().count()).isEqualTo(7.0);
+        assertThat(registry.get("allpets.ratelimit.tracked.ips").gauge().value()).isEqualTo(3.0);
+        // Evicted-and-back IP simply starts a fresh budget (documented fail-open).
         assertThat(bounded.tryAcquire("203.0.113.0").allowed()).isTrue();
     }
 

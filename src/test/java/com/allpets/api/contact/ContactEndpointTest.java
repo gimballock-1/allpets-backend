@@ -107,6 +107,41 @@ class ContactEndpointTest extends PostgresIntegrationTest {
     }
 
     @Test
+    void honeypotWinsOverValidationSoAnInvalidBotPayloadStillLooksAccepted() {
+        long before = repository.count();
+
+        // Invalid name/email/message AND a filled honeypot: the honeypot must win — a 400
+        // here would reveal non-acceptance to the bot (Codex P2-4 regression).
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "", "email", "not-an-email", "message", "",
+                        "website", "http://spam.example"))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(r.getBody()).containsEntry("status", "received");
+        assertThat(repository.count()).isEqualTo(before);
+        verify(emailNotifier, never()).sendContactNotification(any());
+    }
+
+    @Test
+    void oversizedHoneypotValueStillGetsTheFakeSuccess() {
+        long before = repository.count();
+
+        // website carries no @Size constraint: an oversized honeypot must not 400 either.
+        ResponseEntity<Map> r = rest.post().uri("/contact")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("name", "Bot", "email", "bot@example.com", "message", "spam",
+                        "website", "x".repeat(5000)))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(r.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(r.getBody()).containsEntry("status", "received");
+        assertThat(repository.count()).isEqualTo(before);
+        verify(emailNotifier, never()).sendContactNotification(any());
+    }
+
+    @Test
     void notifierFailureIsNonFatalAndSubmissionPersists() {
         // A mail failure must NOT roll back the persisted submission nor surface as 5xx (LLD §6).
         doThrow(new RuntimeException("smtp down")).when(emailNotifier).sendContactNotification(any());

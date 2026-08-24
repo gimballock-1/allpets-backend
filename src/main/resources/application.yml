@@ -36,6 +36,12 @@ management:
       exposure:
         # Health + Prometheus scrape + build/version info. Nothing else exposed.
         include: health,info,prometheus
+      # No consumer walks the /actuator HAL links page (probes hit /health directly,
+      # Prometheus scrapes /prometheus directly) — and with forward-headers-strategy=none
+      # (see `server:` above) its self-links would advertise http:// behind the
+      # TLS-terminating proxy. Off rather than misleading.
+      discovery:
+        enabled: false
   endpoint:
     health:
       probes:
@@ -74,22 +80,33 @@ logging:
 # allpets application config.
 allpets:
   http:
-    # CIDRs the site's in-cluster proxy chain can egress from (14.2). An X-Forwarded-For
-    # entry inside these ranges is a proxy hop, not the client; ClientIpResolver returns
-    # the RIGHT-most entry outside them. Defaults cover every private/CGNAT/loopback range,
-    # which subsumes k3s pods (10.42.0.0/16), services (10.43.0.0/16), the node LAN
-    # (10.0.10.x) and Tailscale (100.64.0.0/10) — a real external client can never carry a
-    # private source IP. Comma-separated; override via env if the cluster ranges change.
-    trusted-proxy-cidrs: ${ALLPETS_TRUSTED_PROXY_CIDRS:10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}
+    # Source ranges a REAL proxy hop occupies (14.2) — deliberately minimal: an
+    # X-Forwarded-For entry inside these is a proxy hop to skip, and XFF is honoured at all
+    # only when the TCP peer itself is in this set. Verified against quasar 2026-08-23:
+    #   10.42.0.0/16    k3s pod CIDR (Traefik + the site proxy are pods; the node's actual
+    #                   range is 10.42.0.0/24, /16 is the k3s cluster default)
+    #   10.0.10.113/32  the node's exact LAN address (hairpin/SNAT egress)
+    #   100.108.60.90/32 the node's exact Tailscale address (NOT all of 100.64.0.0/10 —
+    #                   any other tailnet device is an ordinary client)
+    #   loopback        unreachable from any network; port-forward/local dev
+    # Broad ranges (blanket RFC1918/CGNAT/ULA) are deliberately NOT here: LAN/Tailscale/
+    # tunnel traffic must bucket as itself, not have its spoofable XFF honoured.
+    # Comma-separated; this env var is the escape hatch if cluster addresses change.
+    trusted-proxy-cidrs: ${ALLPETS_TRUSTED_PROXY_CIDRS:10.42.0.0/16,10.0.10.113/32,100.108.60.90/32,127.0.0.1/32,::1/128}
   rate-limit:
-    # Per-resolved-IP limits on POST /contact (14.2) — both windows apply: a burst is
-    # capped at per-minute, sustained abuse at per-hour. GET /reviews is deliberately
-    # unthrottled (read-only cached data). max-tracked-ips bounds the limiter's LRU
-    # key map so it cannot grow without bound.
+    # Per-client limits on POST /contact (14.2) — both windows apply: a burst is capped at
+    # per-minute, sustained abuse at per-hour; when both are saturated Retry-After reports
+    # the later recovery. Enforced in ContactRateLimitInterceptor BEFORE body parsing, so
+    # malformed/invalid/honeypot requests all consume budget. GET /reviews is deliberately
+    # unthrottled (read-only cached data). max-tracked-ips bounds the limiter's LRU key map
+    # (fail-open at the cap; watch the allpets.ratelimit.evictions counter). IPv6 clients
+    # are keyed by their /ipv6-key-prefix network (default /64) so address rotation inside
+    # one delegation shares a single budget.
     contact:
       per-minute: ${ALLPETS_CONTACT_RATE_PER_MINUTE:5}
       per-hour: ${ALLPETS_CONTACT_RATE_PER_HOUR:30}
       max-tracked-ips: ${ALLPETS_CONTACT_RATE_MAX_TRACKED_IPS:10000}
+      ipv6-key-prefix: ${ALLPETS_CONTACT_RATE_IPV6_KEY_PREFIX:64}
   cors:
     # Origin allowlist for the public API host (20.4). The Next.js site's server-side
     # /api proxy origin; credentials are off. CORS is enforced in Spring (CorsConfig),

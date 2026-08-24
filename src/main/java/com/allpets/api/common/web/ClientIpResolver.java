@@ -18,41 +18,62 @@ import org.springframework.stereotype.Component;
  * for proxied traffic, and {@code XFF: [<spoofed…>,] <bot-ip>} for a direct bot hit (Traefik
  * always appends the connecting peer as the last entry).
  *
- * <p><strong>Algorithm:</strong> scan the {@code X-Forwarded-For} entries right-to-left and
- * return the first one NOT inside the configured trusted-proxy CIDRs. Trusted = ranges the
- * in-cluster proxy can egress from; Traefik's own hop is the TCP peer, never an XFF entry.
- * This yields the real IP in both cases above and — critically — ignores anything a direct
- * caller spoofs to the left of the Traefik-appended entry. If every entry is trusted (or the
- * header is absent), fall back to the socket peer address.
+ * <p><strong>Algorithm:</strong>
+ * <ol>
+ *   <li>If the socket peer ({@code getRemoteAddr()}) is NOT in the trusted-proxy set, the
+ *       request did not come through a known proxy — the {@code X-Forwarded-For} header is
+ *       ignored entirely (any client can write it) and the peer itself is the client.</li>
+ *   <li>Otherwise scan the XFF entries right-to-left and return the first one outside the
+ *       trusted set. Trusted = ranges a proxy hop's connection can originate from; Traefik's
+ *       own hop is the TCP peer, never an XFF entry. This yields the real IP for both
+ *       proxied visitors and direct bots, and ignores anything a caller spoofs to the left
+ *       of the Traefik-appended entry — a bot cannot choose its rate-limit bucket.</li>
+ *   <li>If every entry is trusted or unusable (or the header is absent), fall back to the
+ *       socket peer — such traffic shares the proxy-hop bucket. That is deliberate: it only
+ *       happens for cluster-internal callers or a proxy that failed to forward a client IP,
+ *       never for internet traffic (Traefik always appends the external peer).</li>
+ * </ol>
  *
- * <p>Entries that are not IP literals are skipped (they can only occupy attacker-written
- * positions left of the Traefik-appended peer), so the resolved value is always a valid IP —
- * required by the {@code inet}-typed {@code contact_submissions.source_ip} column. The two
- * failure modes this design is tested against: all site users collapsing into one bucket
- * (the proxy egress), and a spoofed left-most entry letting a bot choose its bucket.
+ * <p>At most {@link #MAX_EXAMINED_ENTRIES} entries are examined (from the right), so an
+ * adversarial mega-chain cannot force unbounded work. Entries that are not clean IP
+ * literals — including junk-suffixed forms like {@code 1.2.3.4:garbage} or
+ * {@code [2001:db8::1]junk} — are skipped; they can only occupy attacker-written positions
+ * left of the Traefik-appended peer. The resolved value is therefore always a valid IP,
+ * which the {@code inet}-typed {@code contact_submissions.source_ip} column requires.
  *
  * <p>{@code server.forward-headers-strategy} is deliberately {@code none}: Spring's
  * {@code ForwardedHeaderFilter} trusts the <em>left-most</em> {@code X-Forwarded-For} entry
  * (client-spoofable) and strips the header before controllers see it — exactly the wrong
  * semantics here.
  *
- * <p>Trusted CIDRs are configurable ({@code allpets.http.trusted-proxy-cidrs} /
- * {@code ALLPETS_TRUSTED_PROXY_CIDRS}); the defaults cover every private/CGNAT/loopback
- * range, which subsumes the k3s pod (10.42/16), service (10.43/16), node-LAN (10.0.10.x)
- * and Tailscale (100.64/10) ranges the proxy can egress from — a real external client can
- * never legitimately carry a private source IP.
+ * <p><strong>Trusted set</strong> ({@code allpets.http.trusted-proxy-cidrs} /
+ * {@code ALLPETS_TRUSTED_PROXY_CIDRS}) is deliberately minimal — only source ranges a real
+ * proxy hop occupies, verified against the quasar host 2026-08-23:
+ * <ul>
+ *   <li>{@code 10.42.0.0/16} — k3s pod CIDR (Traefik and the site proxy are pods here;
+ *       this node's range is 10.42.0.0/24, the /16 is the k3s cluster default);</li>
+ *   <li>{@code 10.0.10.113/32} — the node's exact LAN address (hairpin/SNAT egress);</li>
+ *   <li>{@code 100.108.60.90/32} — the node's exact Tailscale address (NOT the whole
+ *       100.64.0.0/10 CGNAT block: any other tailnet device is an ordinary client);</li>
+ *   <li>loopback — unreachable from any network; covers port-forward/local dev.</li>
+ * </ul>
+ * Broad ranges (blanket RFC1918, 100.64.0.0/10, ULA) are deliberately NOT trusted: traffic
+ * arriving from LAN/Tailscale/tunnel paths must bucket as itself, not have its spoofable
+ * XFF honoured. If the cluster ranges change, the property is the escape hatch.
  */
 @Component
 public class ClientIpResolver {
 
     static final String X_FORWARDED_FOR = "X-Forwarded-For";
 
+    /** Upper bound on XFF entries examined (right-to-left) before falling back to the peer. */
+    static final int MAX_EXAMINED_ENTRIES = 32;
+
     private final List<Cidr> trustedProxyCidrs;
 
     public ClientIpResolver(
             @Value("${allpets.http.trusted-proxy-cidrs:"
-                    + "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,"
-                    + "127.0.0.0/8,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}")
+                    + "10.42.0.0/16,10.0.10.113/32,100.108.60.90/32,127.0.0.1/32,::1/128}")
             List<String> trustedProxyCidrs) {
         this.trustedProxyCidrs = trustedProxyCidrs.stream()
                 .map(String::trim)
@@ -62,21 +83,30 @@ public class ClientIpResolver {
     }
 
     /**
-     * @return the resolved client IP in canonical text form — the right-most untrusted
-     *         {@code X-Forwarded-For} entry, or the socket peer when none qualifies
+     * @return the resolved client IP in canonical text form — the right-most non-trusted
+     *         {@code X-Forwarded-For} entry when the socket peer is a trusted proxy hop,
+     *         otherwise the socket peer itself
      */
     public String resolve(HttpServletRequest request) {
+        String remoteAddr = request.getRemoteAddr();
+        InetAddress peer = parseAddress(remoteAddr);
+        if (peer == null || !isTrusted(peer)) {
+            // Not a known proxy hop: the header is attacker-writable, the peer is the client.
+            return peer == null ? remoteAddr : peer.getHostAddress();
+        }
+
         List<String> chain = forwardedChain(request);
-        for (int i = chain.size() - 1; i >= 0; i--) {
+        int floor = Math.max(0, chain.size() - MAX_EXAMINED_ENTRIES);
+        for (int i = chain.size() - 1; i >= floor; i--) {
             InetAddress address = parseAddress(chain.get(i));
             if (address == null) {
-                continue;   // not an IP literal — attacker-written filler, never Traefik's entry
+                continue;   // junk — attacker-written filler, never Traefik's appended entry
             }
             if (!isTrusted(address)) {
                 return address.getHostAddress();
             }
         }
-        return request.getRemoteAddr();
+        return remoteAddr;   // shared proxy-hop bucket; see class javadoc, step 3
     }
 
     /** All XFF entries in order, joined across repeated headers, split on commas, trimmed. */
@@ -104,21 +134,28 @@ public class ClientIpResolver {
     }
 
     /**
-     * Parses an XFF entry as an IP literal (never a DNS lookup), tolerating the
-     * {@code ip:port} and {@code [ipv6]:port} forms some proxies emit. Returns {@code null}
-     * for anything else.
+     * Parses an XFF entry as an IP literal (never a DNS lookup), tolerating exactly the
+     * {@code ipv4:port} and {@code [ipv6]:port} forms some proxies emit. Anything else —
+     * including junk-suffixed forms like {@code 1.2.3.4:garbage} or {@code [::1]junk} —
+     * returns {@code null} and is skipped rather than partially salvaged.
      */
     private static InetAddress parseAddress(String entry) {
+        if (entry == null || entry.isEmpty()) {
+            return null;
+        }
         String candidate = entry;
-        if (candidate.startsWith("[")) {                       // [2001:db8::1]:443 or [2001:db8::1]
+        if (candidate.startsWith("[")) {                       // [2001:db8::1] or [2001:db8::1]:443
             int close = candidate.indexOf(']');
-            if (close < 0) {
+            if (close < 0 || !isEmptyOrPortSuffix(candidate.substring(close + 1))) {
                 return null;
             }
             candidate = candidate.substring(1, close);
         } else {
             int firstColon = candidate.indexOf(':');
             if (firstColon >= 0 && candidate.indexOf(':', firstColon + 1) < 0) {
+                if (!isPort(candidate.substring(firstColon + 1))) {
+                    return null;                               // "1.2.3.4:garbage" is junk
+                }
                 candidate = candidate.substring(0, firstColon);   // ipv4:port — one colon only
             }
         }
@@ -127,6 +164,22 @@ public class ClientIpResolver {
         } catch (IllegalArgumentException notAnIpLiteral) {
             return null;
         }
+    }
+
+    private static boolean isEmptyOrPortSuffix(String s) {
+        return s.isEmpty() || (s.charAt(0) == ':' && isPort(s.substring(1)));
+    }
+
+    private static boolean isPort(String s) {
+        if (s.isEmpty() || s.length() > 5) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** A parsed {@code network/prefix} range; matches by address family + leading prefix bits. */
