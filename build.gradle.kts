@@ -19,6 +19,12 @@ repositories {
     mavenCentral()
 }
 
+// pgjdbc: Boot 4.1.0 manages 42.7.11, which carries CVE-2026-54291 (HIGH —
+// SCRAM-SHA-256-PLUS MITM downgrade, fixed in 42.7.12); the CD Trivy image gate
+// (14.8) blocks deploys on it. Override the Boot-managed version until a Boot
+// patch release manages ≥42.7.12, then delete this line.
+extra["postgresql.version"] = "42.7.12"
+
 dependencies {
     // Web + health/metrics + input validation (20.1).
     implementation("org.springframework.boot:spring-boot-starter-web")

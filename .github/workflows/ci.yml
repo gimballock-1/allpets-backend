@@ -37,12 +37,39 @@ jobs:
       - name: Build and test
         run: ./gradlew --no-daemon build
 
+  # Dependency review (14.7): fails the PR when an added/updated dependency
+  # (Gradle via build.gradle.kts, or GitHub Actions) carries a known advisory
+  # of high or critical severity. This is the PR-time dependency gate; the
+  # full-tree vulnerability net is cd.yml's Trivy scan of the built image
+  # (which reads every dependency jar inside the Spring Boot fat jar) — a
+  # Trivy *filesystem* scan finds nothing in this repo because there is no
+  # gradle.lockfile for it to parse (verified locally: "Number of
+  # language-specific files num=0"). Runs on the pull_request event only —
+  # the action diffs the base↔head dependency graphs, so it has nothing to
+  # compare on workflow_dispatch (the ci aggregator below tolerates that
+  # skip). actions/dependency-review-action is GitHub-owned, so the repo's
+  # restricted Actions allowlist is unchanged.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
   # Single, stable required-status-check context for branch protection. Stays
   # "ci" even as the jobs above evolve (matrix, lint, integration, …), so the
   # ruleset never needs editing when the pipeline changes.
   ci:
     if: always()
-    needs: [build-and-test]
+    needs: [build-and-test, dependency-review]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -52,4 +79,10 @@ jobs:
             echo "::error::build-and-test result was '${{ needs.build-and-test.result }}'"
             exit 1
           fi
+          # dependency-review only runs on pull_request; on workflow_dispatch it
+          # is skipped by design. Anything else (failure/cancelled) fails ci.
+          case "${{ needs.dependency-review.result }}" in
+            success|skipped) ;;
+            *) echo "::error::dependency-review result was '${{ needs.dependency-review.result }}'"; exit 1 ;;
+          esac
           echo "All required CI jobs passed."

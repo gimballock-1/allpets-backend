@@ -36,6 +36,8 @@ on:
       - 'deploy/k8s/ingress/redirect-https.yaml'
       - 'deploy/ci/known_hosts'
       - '.github/workflows/cd.yml'
+      # A merged Trivy waiver must re-run the (previously blocked) deploy gate.
+      - '.trivyignore'
   workflow_dispatch:
 
 concurrency:
@@ -83,6 +85,42 @@ jobs:
           # `apply -k` pulls a real image); :<sha> is the immutable tag the deploy pins to.
           tags: |
             ghcr.io/gimballock-1/allpets-api:main
+            ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
+
+      # Trivy is installed as a checksum-verified binary from its GitHub release —
+      # NOT via aquasecurity/trivy-action, which the repo's restricted Actions
+      # allowlist (GitHub-owned + verified creators + tailscale/github-action)
+      # doesn't cover. Version + sha256 are pinned; Dependabot doesn't track
+      # this, so bump both together deliberately.
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          TRIVY_VERSION=0.74.0
+          TRIVY_SHA256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+          curl -sSfL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          sudo tar -xzf trivy.tar.gz -C /usr/local/bin trivy
+          rm trivy.tar.gz
+          trivy --version
+
+      # Vulnerability gate (14.8): scan the image this run just pushed and abort
+      # on any HIGH/CRITICAL finding with a fix available (--ignore-unfixed:
+      # unfixable advisories are noise nothing can act on). The image is already
+      # in GHCR at this point — build+push is a single step — which is accepted:
+      # the gate is on DEPLOY, so a vulnerable image never reaches the cluster.
+      # Scanning the :<sha> tag matches exactly what the deploy step below pulls
+      # (same IMAGE ref; the cd-deploy concurrency group serializes runs, so the
+      # tag can't be overwritten between push, scan, and deploy). This is also
+      # the repo's full-tree dependency vulnerability net: Trivy reads every
+      # dependency jar inside the Spring Boot fat jar plus the Alpine base
+      # packages (ci.yml's dependency-review only diffs PR-introduced deps —
+      # there is no gradle.lockfile for a filesystem scan to parse). Waivers
+      # live in .trivyignore (reason + review date required per entry).
+      - name: Scan pushed image (gates the deploy)
+        run: |
+          trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+            --ignorefile .trivyignore \
             ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
 
       - name: Connect to Tailscale
