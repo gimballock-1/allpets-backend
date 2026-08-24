@@ -1,0 +1,172 @@
+# allpets contact-inbox retention purge — CronJob (issue 14.10)
+#
+# WHAT: nightly deletes `contact_submissions` rows in appdb older than
+# RETENTION_DAYS. This is the automated half of the 14.10 privacy work; the
+# request-driven erasure half is the runbook (planning/data-erasure-runbook.md).
+# Without this, contact-form PII (name/email/message, req §5.2/§7.1) accumulates
+# forever — which the privacy policy (17.9) could then never honestly describe.
+#
+# RETENTION WINDOW: 180 days is the RECOMMENDED DEFAULT, PENDING client
+# confirmation (18.14). It is parameterized as the RETENTION_DAYS env var below —
+# when the client confirms a different window, change ONLY that value (and update
+# planning/data-erasure-runbook.md + the 17.9 privacy text to match).
+#
+# SCHEDULE — 04:30 cluster time, and why:
+#   The nightly pg_dump (deploy/k8s/database/pgdump-cronjob.yaml) fires at 03:00
+#   with startingDeadlineSeconds=3600, i.e. a delayed dump may still START as
+#   late as ~04:00. 04:30 clears even that worst case, so the purge never
+#   contends with the backup for the DB, and each night's dump is taken BEFORE
+#   that night's purge (the last archive containing a purged row is the same
+#   morning's — see the backups caveat in planning/data-erasure-runbook.md:
+#   purged rows persist in on-disk dump archives up to ~15 days, the 14-day dump
+#   retention + nightly prune granularity). Still off-peak for a vet clinic.
+#
+# AUTH + NETWORKING: runs in ns `allpets-backend` (same as the API) and connects
+# cross-namespace to postgres.allpets-database.svc:5432 as the app role
+# `app_svc` (owner of appdb — DELETE needs no superuser), password from the
+# existing `allpets-api-secret` (key SPRING_DATASOURCE_PASSWORD, same credential
+# the API + migrate Job already use — no new secret). NetworkPolicy: the 2.6
+# `allow-from-backend` policy in allpets-database admits ANY pod in the
+# allpets-backend NAMESPACE on 5432 (namespaceSelector only, no podSelector),
+# so this Job pod is covered as-is; egress from allpets-backend is open by
+# design. No NetworkPolicy change needed — verified against
+# deploy/k8s/networkpolicies/backend-database.yaml.
+#
+# IDEMPOTENT + PII-SAFE: the DELETE is a pure predicate on created_at — running
+# it twice, or after a missed night, deletes nothing extra. The job logs ONLY
+# the deleted row count (req §8.4) — never emails, names, or messages.
+#
+# IMAGE (14.8): postgres:16.4, pinned to match the server and the pgdump
+# CronJob. Keep in sync with deploy/k8s/database/* pins; pin by digest when
+# 14.8's digest pass lands.
+#
+# Unlike migrate-job.yaml (a Job, immutable, CD-managed), CronJobs are mutable —
+# this file IS wired into api/kustomization.yaml and applies with the tree.
+# Manual smoke-test on-cluster:
+#   kubectl -n allpets-backend create job --from=cronjob/contact-retention-purge purge-manual-verify
+#   kubectl -n allpets-backend wait --for=condition=complete job/purge-manual-verify --timeout=120s
+#   kubectl -n allpets-backend logs job/purge-manual-verify   # expect "purged N rows"
+#   kubectl -n allpets-backend delete job purge-manual-verify
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: contact-retention-purge
+  namespace: allpets-backend
+  labels:
+    app.kubernetes.io/name: contact-retention-purge
+    app.kubernetes.io/component: retention
+    app.kubernetes.io/part-of: allpets
+    allpets.skpodduturi.dev/tier: backend
+spec:
+  # 04:30 cluster time — after the 03:00 pg_dump's worst-case delayed start
+  # (03:00 + startingDeadlineSeconds 3600); see header for the full rationale.
+  schedule: "30 4 * * *"
+  # A purge is cheap, but never let two runs race the same rows.
+  concurrencyPolicy: Forbid
+  # If the cluster was down at 04:30, don't fire a stampede of missed runs —
+  # the next night's run purges everything the missed one would have (idempotent).
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: contact-retention-purge
+        app.kubernetes.io/component: retention
+        app.kubernetes.io/part-of: allpets
+        allpets.skpodduturi.dev/tier: backend
+    spec:
+      # One automatic retry on transient failure (DB restart etc.), then give up
+      # — the next nightly run covers the gap. Mirrors pgdump-cronjob.
+      backoffLimit: 1
+      # Reap finished Jobs after a day so history doesn't accumulate pods.
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: contact-retention-purge
+            app.kubernetes.io/component: retention
+            app.kubernetes.io/part-of: allpets
+            allpets.skpodduturi.dev/tier: backend
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          containers:
+            - name: purge
+              image: postgres:16.4
+              imagePullPolicy: IfNotPresent
+              env:
+                # Retention window in days. 180 = RECOMMENDED DEFAULT, PENDING
+                # client confirmation (18.14) — this env var is the ONE knob.
+                - name: RETENTION_DAYS
+                  value: "180"
+                # In-cluster Postgres endpoint (4.2 Service), cross-namespace.
+                - name: PGHOST
+                  value: postgres.allpets-database.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: appdb
+                # The app role that owns appdb — NOT the superuser. Same
+                # credential the API Deployment + migrate Job consume.
+                - name: PGUSER
+                  value: app_svc
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: allpets-api-secret
+                      key: SPRING_DATASOURCE_PASSWORD
+                # Writable scratch for psql/libpq/bash (readOnlyRootFilesystem
+                # is on; /tmp below is an emptyDir).
+                - name: TMPDIR
+                  value: /tmp
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 999
+                runAsGroup: 999
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  # Guard: RETENTION_DAYS must be a positive integer. psql -v
+                  # substitutes the value textually into the SQL, so this check
+                  # is also the injection guard for the one parameter we take.
+                  if ! [[ "${RETENTION_DAYS}" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "FATAL: RETENTION_DAYS='${RETENTION_DAYS}' is not a positive integer" >&2
+                    exit 1
+                  fi
+                  echo "[$(date -u +%FT%TZ)] purging contact_submissions older than ${RETENTION_DAYS} days"
+                  # Idempotent, count-only output — NO PII is ever selected or
+                  # logged (req §8.4). -X: skip psqlrc; -q -A -t: bare count.
+                  DELETED=$(psql -X -q -A -t -v ON_ERROR_STOP=1 \
+                    -v days="${RETENTION_DAYS}" <<'SQL'
+                  WITH del AS (
+                    DELETE FROM contact_submissions
+                    WHERE created_at < now() - make_interval(days => :days)
+                    RETURNING 1
+                  )
+                  SELECT count(*) FROM del;
+                  SQL
+                  )
+                  echo "[$(date -u +%FT%TZ)] purged ${DELETED} rows"
+              resources:
+                # Tiny: one psql statement. Within the allpets-backend budget.
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            # Writable scratch so psql/bash work with a read-only root fs.
+            - name: tmp
+              emptyDir: {}
