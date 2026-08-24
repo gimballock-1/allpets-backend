@@ -4,8 +4,9 @@ package com.allpets.api.common.web;
  * Port for per-client rate limiting on public write endpoints.
  *
  * <p>Implemented by {@link SlidingWindowRateLimiter} (14.2): 5/minute and 30/hour per
- * resolved client IP on {@code POST /contact}. The controller calls this on every request
- * and translates a denial into {@code 429} + {@code Retry-After} (seconds).
+ * resolved client IP on {@code POST /contact}. {@link ContactRateLimitInterceptor} calls
+ * this on every request — before the body is even deserialized — and translates a denial
+ * into {@code 429} + {@code Retry-After} (seconds).
  */
 public interface RateLimiter {
 

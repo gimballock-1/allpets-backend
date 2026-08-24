@@ -92,6 +92,15 @@ allpets:
     # Broad ranges (blanket RFC1918/CGNAT/ULA) are deliberately NOT here: LAN/Tailscale/
     # tunnel traffic must bucket as itself, not have its spoofable XFF honoured.
     # Comma-separated; this env var is the escape hatch if cluster addresses change.
+    #
+    # RESIDUAL SEMANTICS (PR #218): the site's /api proxy reaches Spring over the
+    # in-cluster Service URL (peer = site pod in 10.42/16, XFF = real client), so proxied
+    # visitors each resolve to their own IP. DIRECT traffic to the public
+    # api-allpets host still traverses Cloudflare (orange-cloud) -> Traefik, whose
+    # default config rewrites XFF to its connecting peer — such requests bucket per
+    # CF-edge/router IP: a SHARED bucket, acceptable for spam control on a direct-bot
+    # path (the site never uses it). Improvable later by trusting Cloudflare's
+    # published ranges + honouring CF-Connecting-IP.
     trusted-proxy-cidrs: ${ALLPETS_TRUSTED_PROXY_CIDRS:10.42.0.0/16,10.0.10.113/32,100.108.60.90/32,127.0.0.1/32,::1/128}
   rate-limit:
     # Per-client limits on POST /contact (14.2) — both windows apply: a burst is capped at

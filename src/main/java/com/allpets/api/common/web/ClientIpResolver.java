@@ -11,12 +11,18 @@ import org.springframework.stereotype.Component;
 /**
  * Resolves the real client IP behind the site's proxy chain (14.2).
  *
- * <p><strong>Topology</strong> (Frontend LLD §4.2): the browser POSTs the site's same-origin
- * {@code /api/contact}; the Next.js route handler server-side fetches this API and sets
- * {@code X-Forwarded-For: <real client IP>}; Traefik then appends its immediate peer (the
- * proxy's cluster-internal egress IP). So Spring sees {@code XFF: <client>, <proxy-egress>}
- * for proxied traffic, and {@code XFF: [<spoofed…>,] <bot-ip>} for a direct bot hit (Traefik
- * always appends the connecting peer as the last entry).
+ * <p><strong>Topology</strong> (Frontend LLD §4.2, revised for PR #218): the browser POSTs
+ * the site's same-origin {@code /api/contact}; the Next.js route handler server-side
+ * fetches this API over the in-cluster Service URL
+ * ({@code http://allpets-api.allpets-backend.svc.cluster.local:8080}) and sets
+ * {@code X-Forwarded-For: <real client IP>} — so for proxied visitors the TCP peer is the
+ * site pod (pod CIDR, trusted) and XFF carries the real client. The proxy deliberately
+ * does NOT fetch the public {@code api-allpets} host: that host is Cloudflare-proxied, and
+ * the CF hop + default Traefik (which rewrites XFF to its connecting peer) would collapse
+ * every visitor into one shared bucket. Direct/public traffic still arrives via
+ * Cloudflare → Traefik: its peer is the Traefik pod (trusted) and its XFF is whatever
+ * Traefik wrote — typically the CF-edge/router IP, sometimes preceded by hops a proxy
+ * appended (Traefik appends the connecting peer when the source is trusted for forwarding).
  *
  * <p><strong>Algorithm:</strong>
  * <ol>
