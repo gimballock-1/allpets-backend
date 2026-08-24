@@ -44,16 +44,46 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability
-# NOTE: there is deliberately NO `allow-from-frontend` policy (the pre-pivot version was
-# removed in 20.5). The pivot dropped the old in-cluster Next.js -> Payload content-API
-# seam (content is now file-based) and put the Spring API on its OWN PUBLIC host: the
-# site's /api proxy server-side-fetches api-allpets.skpodduturi.dev THROUGH Traefik
-# (allow-traefik-ingress below, :8080), NOT over an allpets-frontend -> allpets-backend
-# pod path. So the frontend namespace needs no ingress allow here; re-adding one
-# (podSelector {}, all ports) would needlessly widen the blast radius onto the Spring
-# API + Cal.com + Plausible. See architecture.md ("site->API path is public, not
-# in-cluster") + lld-backend.md §netpol. Re-add a SCOPED allow only if the /api proxy is
-# ever re-pointed at an in-cluster Service URL instead of the public host.
+# HISTORY: 20.5 removed the pre-pivot `allow-from-frontend` policy because the site's
+# /api proxy fetched the Spring API via its PUBLIC host through Traefik, and reserved
+# this path: "re-add a SCOPED allow only if the /api proxy is ever re-pointed at an
+# in-cluster Service URL instead of the public host."
+#
+# THAT CONDITION FIRED 2026-08-23 (14.2 rate limiting, backend PR #218 + the parallel
+# frontend repoint): the public host is Cloudflare orange-cloud PROXIED, so the proxy's
+# fetch travelled proxy-pod -> Cloudflare edge -> WAN -> Traefik, and default Traefik
+# rewrites X-Forwarded-For to its connecting peer — every visitor collapsed into one
+# shared Cloudflare-edge/router bucket, inverting the per-IP limiter. The /api proxy now
+# targets http://allpets-api.allpets-backend.svc.cluster.local:8080 directly, so Spring
+# sees peer = the site pod (10.42/16, trusted) and XFF = the real client IP.
+# allow-frontend-to-api below is that reserved SCOPED allow: allpets-frontend namespace
+# only, the Spring API pods only (NOT Cal.com/Plausible), port 8080 only, and the
+# frontend side further pinned to pods carrying the label-contract `part-of: allpets`
+# (verified on the live allpets-site pod). Direct/public API traffic still flows through
+# allow-traefik-ingress below.
+---
+# Site /api proxy (allpets-frontend ns) -> Spring API pods on 8080 ONLY (14.2 / PR #218;
+# see the history note above for why this exists and why it is this narrow).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-api
+  namespace: allpets-backend
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: allpets-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: allpets-frontend
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: allpets
+      ports:
+        - { protocol: TCP, port: 8080 }  # Spring API container port (named `http`)
 ---
 # Traefik (kube-system) -> backend services that ingress directly:
 # api.allpets -> Spring API (8080), book.allpets -> Cal.com (3000),
