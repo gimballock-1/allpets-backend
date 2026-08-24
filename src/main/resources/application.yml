@@ -24,8 +24,11 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
-  # Behind Traefik: trust forwarded headers so client IP / scheme are correct (14.x).
-  forward-headers-strategy: framework
+  # Deliberately NOT `framework` (14.2): Spring's ForwardedHeaderFilter trusts the
+  # LEFT-most X-Forwarded-For entry (client-spoofable) and strips the header before
+  # controllers see it. Client-IP resolution is done explicitly in ClientIpResolver
+  # (right-most non-trusted XFF entry against allpets.http.trusted-proxy-cidrs below).
+  forward-headers-strategy: none
 
 management:
   endpoints:
@@ -70,6 +73,23 @@ logging:
 
 # allpets application config.
 allpets:
+  http:
+    # CIDRs the site's in-cluster proxy chain can egress from (14.2). An X-Forwarded-For
+    # entry inside these ranges is a proxy hop, not the client; ClientIpResolver returns
+    # the RIGHT-most entry outside them. Defaults cover every private/CGNAT/loopback range,
+    # which subsumes k3s pods (10.42.0.0/16), services (10.43.0.0/16), the node LAN
+    # (10.0.10.x) and Tailscale (100.64.0.0/10) — a real external client can never carry a
+    # private source IP. Comma-separated; override via env if the cluster ranges change.
+    trusted-proxy-cidrs: ${ALLPETS_TRUSTED_PROXY_CIDRS:10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}
+  rate-limit:
+    # Per-resolved-IP limits on POST /contact (14.2) — both windows apply: a burst is
+    # capped at per-minute, sustained abuse at per-hour. GET /reviews is deliberately
+    # unthrottled (read-only cached data). max-tracked-ips bounds the limiter's LRU
+    # key map so it cannot grow without bound.
+    contact:
+      per-minute: ${ALLPETS_CONTACT_RATE_PER_MINUTE:5}
+      per-hour: ${ALLPETS_CONTACT_RATE_PER_HOUR:30}
+      max-tracked-ips: ${ALLPETS_CONTACT_RATE_MAX_TRACKED_IPS:10000}
   cors:
     # Origin allowlist for the public API host (20.4). The Next.js site's server-side
     # /api proxy origin; credentials are off. CORS is enforced in Spring (CorsConfig),

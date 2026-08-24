@@ -54,7 +54,7 @@ class ContactEndpointTest extends PostgresIntegrationTest {
                 .baseUrl("http://localhost:" + port)
                 .defaultStatusHandler(HttpStatusCode::isError, (req, res) -> { })
                 .build();
-        when(rateLimiter.tryAcquire(any())).thenReturn(true);
+        when(rateLimiter.tryAcquire(any())).thenReturn(RateLimiter.Decision.allow());
     }
 
     @Test
@@ -123,7 +123,7 @@ class ContactEndpointTest extends PostgresIntegrationTest {
 
     @Test
     void overRateLimitReturns429() {
-        when(rateLimiter.tryAcquire(any())).thenReturn(false);
+        when(rateLimiter.tryAcquire(any())).thenReturn(RateLimiter.Decision.limit(60));
         long before = repository.count();
 
         ResponseEntity<Map> r = rest.post().uri("/contact")

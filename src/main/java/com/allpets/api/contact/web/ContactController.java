@@ -1,5 +1,6 @@
 package com.allpets.api.contact.web;
 
+import com.allpets.api.common.web.ClientIpResolver;
 import com.allpets.api.common.web.RateLimiter;
 import com.allpets.api.contact.service.ContactService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -14,9 +15,14 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * {@code POST /contact} — public, unauthenticated. Validates input, applies a per-IP
- * rate-limit hook and a honeypot, then persists + triggers a staff notification. The
- * site's same-origin {@code /api/contact} proxy is the caller (Frontend LLD §4.2).
+ * {@code POST /contact} — public, unauthenticated. Validates input, applies the per-IP
+ * rate limit (14.2) and the honeypot (14.3), then persists + triggers a staff notification.
+ * The site's same-origin {@code /api/contact} proxy is the caller (Frontend LLD §4.2).
+ *
+ * <p>Ordering matters: the rate limit is checked <em>before</em> the honeypot so honeypot
+ * submissions still consume the caller's budget — a flooding bot hits 429 regardless of
+ * whether it trips the honeypot. All log lines here are count-only (no name/email/message —
+ * no PII in logs, req §8.4).
  */
 @RestController
 public class ContactController {
@@ -26,24 +32,27 @@ public class ContactController {
 
     private final ContactService contactService;
     private final RateLimiter rateLimiter;
+    private final ClientIpResolver clientIpResolver;
 
-    public ContactController(ContactService contactService, RateLimiter rateLimiter) {
+    public ContactController(ContactService contactService, RateLimiter rateLimiter,
+                             ClientIpResolver clientIpResolver) {
         this.contactService = contactService;
         this.rateLimiter = rateLimiter;
+        this.clientIpResolver = clientIpResolver;
     }
 
     @PostMapping("/contact")
     public ResponseEntity<Map<String, String>> submit(@Valid @RequestBody ContactRequest request,
                                                        HttpServletRequest http) {
-        // X-Forwarded-For is honoured via server.forward-headers-strategy=framework.
-        // NOTE for 14.2: inbound XFF is client-spoofable, so the per-IP limiter is only
-        // sound if Traefik strips/overwrites XFF at the edge (trust just Traefik's hop).
-        String clientIp = http.getRemoteAddr();
+        // Right-most non-trusted X-Forwarded-For entry (see ClientIpResolver): proxied
+        // visitors resolve to their real IP, and a direct bot cannot spoof its bucket.
+        String clientIp = clientIpResolver.resolve(http);
 
-        if (!rateLimiter.tryAcquire(clientIp)) {
+        RateLimiter.Decision decision = rateLimiter.tryAcquire(clientIp);
+        if (!decision.allowed()) {
             log.warn("contact submission rate-limited");
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .header("Retry-After", "60")
+                    .header("Retry-After", Long.toString(decision.retryAfterSeconds()))
                     .body(Map.of("status", "rate_limited"));
         }
 
