@@ -1,6 +1,7 @@
 # Dependabot configuration — https://docs.github.com/code-security/dependabot
-# Backend: Gradle (Kotlin DSL) + GitHub Actions. Security updates are enabled
-# separately in repo settings; this file adds routine version updates.
+# Backend: Gradle (Kotlin DSL) + GitHub Actions + Docker base images. Security
+# updates are enabled separately in repo settings; this file adds routine
+# version updates.
 version: 2
 updates:
   - package-ecosystem: "gradle"
@@ -32,5 +33,18 @@ updates:
       interval: "weekly"
     groups:
       github-actions:
+        patterns:
+          - "*"
+
+  # Keeps the @sha256 digest pins in deploy/Dockerfile.api current (14.8):
+  # pinning by digest must not mean staleness — Dependabot PRs the new digest
+  # whenever eclipse-temurin re-tags 25-{jdk,jre}-alpine (e.g. an Alpine or JDK
+  # security respin).
+  - package-ecosystem: "docker"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-base-images:
         patterns:
           - "*"

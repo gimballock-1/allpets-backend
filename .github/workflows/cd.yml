@@ -36,6 +36,8 @@ on:
       - 'deploy/k8s/ingress/redirect-https.yaml'
       - 'deploy/ci/known_hosts'
       - '.github/workflows/cd.yml'
+      # A merged Trivy waiver must re-run the (previously blocked) deploy gate.
+      - '.trivyignore'
   workflow_dispatch:
 
 concurrency:
@@ -74,16 +76,54 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/Dockerfile.api
           push: true
           # :main is the floating ref the committed Deployment placeholder uses (so the first
-          # `apply -k` pulls a real image); :<sha> is the immutable tag the deploy pins to.
+          # `apply -k` pulls a real image); :<sha> is the per-commit tag for humans — the scan
+          # and deploy below pin the pushed DIGEST, the only truly immutable reference.
           tags: |
             ghcr.io/gimballock-1/allpets-api:main
             ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
+
+      # Trivy is installed as a checksum-verified binary from its GitHub release —
+      # NOT via aquasecurity/trivy-action, which the repo's restricted Actions
+      # allowlist (GitHub-owned + verified creators + tailscale/github-action)
+      # doesn't cover. Version + sha256 are pinned; Dependabot doesn't track
+      # this, so bump both together deliberately.
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          TRIVY_VERSION=0.74.0
+          TRIVY_SHA256=2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+          curl -sSfL -o trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum -c -
+          sudo tar -xzf trivy.tar.gz -C /usr/local/bin trivy
+          rm trivy.tar.gz
+          trivy --version
+
+      # Vulnerability gate (14.8): scan the image this run just pushed and abort
+      # on any HIGH/CRITICAL finding with a fix available (--ignore-unfixed:
+      # unfixable advisories are noise nothing can act on). The image is already
+      # in GHCR at this point — build+push is a single step — which is accepted:
+      # the gate is on DEPLOY, so a vulnerable image never reaches the cluster.
+      # Scans by DIGEST — the exact bytes this run pushed and the exact ref the
+      # deploy step below pins (a tag like :<sha> is rewritable, so scanned
+      # bytes and deployed bytes could diverge; the digest can't). This is also
+      # the repo's full-tree dependency vulnerability net: Trivy reads every
+      # dependency jar inside the Spring Boot fat jar plus the Alpine base
+      # packages (ci.yml's dependency-review only diffs PR-introduced deps —
+      # there is no gradle.lockfile for a filesystem scan to parse). Waivers
+      # live in .trivyignore (reason + review date required per entry).
+      - name: Scan pushed image (gates the deploy)
+        run: |
+          trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+            --ignorefile .trivyignore \
+            ghcr.io/gimballock-1/allpets-api@${{ steps.build.outputs.digest }}
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
@@ -95,10 +135,24 @@ jobs:
       - name: Deploy to quasar (k3s) over Tailscale
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEV_SERVER_SSH_KEY }}
-          IMAGE: ghcr.io/gimballock-1/allpets-api:${{ github.sha }}
+          # Deploy the DIGEST, not the :<sha> tag (mirrors the frontend cd.yml):
+          # a tag is a rewritable pointer — a re-run of the same commit or any
+          # other package writer can move it between scan and pull, and an
+          # unchanged image *string* lets IfNotPresent serve a node's stale
+          # cache. The digest is what this run actually pushed AND what the
+          # Trivy gate above actually scanned — scan ref == deploy ref, always.
+          IMAGE: ghcr.io/gimballock-1/allpets-api@${{ steps.build.outputs.digest }}
+          # GIT_SHA stays for `set env` (health/metadata surface) — it no longer
+          # participates in image references.
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Refuse a malformed image ref: an empty digest output would otherwise
+          # sail through the sed+grep pin guards by construction.
+          case "$IMAGE" in
+            *@sha256:?*) ;;
+            *) echo "::error::build step produced no image digest (IMAGE='$IMAGE')"; exit 1 ;;
+          esac
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
@@ -137,8 +191,10 @@ jobs:
           # --- Migration gate (15.9): run Flyway from the NEW image as a one-shot Job and
           # wait for it BEFORE rolling the app, so a failed migration never reaches a pod
           # (and, at >1 replica, replicas never race to migrate). Jobs are immutable, so
-          # delete the prior run, then render this build's image into the manifest.
-          sed "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/migrate-job.yaml > /tmp/allpets-migrate-job.yaml
+          # delete the prior run, then render this build's image digest into the manifest.
+          sed "s#ghcr.io/gimballock-1/allpets-api:main#${IMAGE}#" ~/allpets-deploy/api/migrate-job.yaml > /tmp/allpets-migrate-job.yaml
+          grep -qF -- "$IMAGE" /tmp/allpets-migrate-job.yaml \
+            || { echo "::error::image pin failed — the :main placeholder in migrate-job.yaml drifted from the sed pattern"; exit 1; }
           kubectl -n "$NS" delete job allpets-api-migrate --ignore-not-found --wait=true
           kubectl -n "$NS" apply -f /tmp/allpets-migrate-job.yaml
           echo "Waiting for the DB migration job to complete…"
@@ -160,10 +216,12 @@ jobs:
             sleep 4
           done
           kubectl -n "$NS" logs job/allpets-api-migrate --tail=20 || true
-          # Pin the immutable :sha into the manifest BEFORE apply -k so the Deployment never
+          # Pin the immutable digest into the manifest BEFORE apply -k so the Deployment never
           # rolls through the mutable :main placeholder (which IfNotPresent could resolve to a
           # node's stale cached :main, briefly running old code against the just-migrated DB).
-          sed -i "s#allpets-api:main#allpets-api:${GIT_SHA}#" ~/allpets-deploy/api/deployment.yaml
+          sed -i "s#ghcr.io/gimballock-1/allpets-api:main#${IMAGE}#" ~/allpets-deploy/api/deployment.yaml
+          grep -qF -- "$IMAGE" ~/allpets-deploy/api/deployment.yaml \
+            || { echo "::error::image pin failed — the :main placeholder in deployment.yaml drifted from the sed pattern"; exit 1; }
           kubectl apply -k ~/allpets-deploy/api
           kubectl -n "$NS" set env "$DEP" GIT_SHA="$GIT_SHA" BUILD_TIME="$BUILD_TIME"
           kubectl -n "$NS" set image "$DEP" allpets-api="$IMAGE"

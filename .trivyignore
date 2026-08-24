@@ -1,0 +1,16 @@
+# Trivy waivers for the CD image-scan gate (.github/workflows/cd.yml, 14.8).
+#
+# EVERY entry MUST carry, in its comment:
+#   1. why shipping with it is acceptable (not reachable/exploitable here,
+#      no fixed version released yet, mitigation in place, …), and
+#   2. a review-by date — entries are time-boxed debt, not permanent
+#      exceptions. Remove the entry as soon as the fixed version ships.
+#
+# This legacy .trivyignore format supports ONLY full-line comments — an inline
+# comment appended to a CVE line would break the ignore. Put the reason on the
+# comment line(s) ABOVE the entry and keep the CVE line bare:
+#
+#   # <reason> — review by YYYY-MM-DD
+#   CVE-2026-XXXXX
+#
+# (no waivers currently)
