@@ -367,6 +367,9 @@ online and complete the deferred 3.5 verification.
 > `deploy/k8s/database/`; the intra-namespace allows live under
 > `deploy/k8s/networkpolicies/`. **No secrets are inlined here** — only Secret names.
 
+Data-subject **erasure** + the `contact_submissions` retention purge (14.10) live in
+`planning/data-erasure-runbook.md` — incl. the backup-lag caveat that bounds §3.6/§3.7.
+
 ### 3.1 Topology (what runs in `allpets-database`)
 - **Postgres** — plain `Deployment` (1 replica, `strategy: Recreate` — RWO PVC,
   never two pods on one volume), pinned image `postgres:16.4` (digest preferred,
