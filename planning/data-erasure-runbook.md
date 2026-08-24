@@ -2,13 +2,17 @@
 
 > **Owner:** 14.10. **Source of truth** for erasing one person's data from every
 > store allpets holds it in, and for the automated retention purge. Personal data
-> lives in exactly **two** stores: (1) the Spring backend's `contact_submissions`
-> table in **appdb** (name / email / message / source IP / user agent, req
-> §5.2/§7.1) and (2) **Cal.com hosted** (cal.com Teams SaaS — booking intake
-> answers: owner name/email/phone, pet details, req §4.5.1). There is **no**
-> self-hosted Cal.com database — the 2026-06-26 decision moved booking to
-> Cal.com's cloud, so the booking half of this runbook is a **staff procedure in
-> the hosted Cal.com admin UI**, not SQL. One erasure request = **both**
+> lives in **two primary stores plus one copy path**: (1) the Spring backend's
+> `contact_submissions` table in **appdb** (name / email / message / source IP /
+> user agent, req §5.2/§7.1); (2) **Cal.com hosted** (cal.com Teams SaaS —
+> booking intake answers: owner name/email/phone, pet details, req §4.5.1); and
+> (3) — **once Epic 13 lands** — the **clinic notification mailbox**, which
+> receives an email copy of every accepted contact submission (name/email/
+> message) via SMTP (`ContactService` → `EmailNotifier`, lld-backend.md §6; the
+> phase-1 stub logs only the submission id, no PII). There is **no** self-hosted
+> Cal.com database — the 2026-06-26 decision moved booking to Cal.com's cloud,
+> so the booking half of this runbook is a **staff procedure in the hosted
+> Cal.com admin UI**, not SQL. One erasure request = **all** applicable
 > checklists below, always.
 >
 > **This runbook bounds what the privacy policy (17.9) may promise** — see §5.
@@ -26,10 +30,17 @@ delete their personal data. Verify the requester controls the email address
 
 - [ ] Verify the requester's control of the target email address.
 - [ ] §1.1 — delete their `contact_submissions` rows in appdb (preview → delete).
-- [ ] §1.2 — cancel/remove their Cal.com bookings (hosted admin UI).
-- [ ] §1.3 — record the action (who/when/counts — **never** the PII itself).
-- [ ] Reply to the requester: done, plus the backup-lag caveat from §3 (their
-  rows persist in local backup archives up to ~15 days, then rotate out).
+- [ ] §1.2 — cancel/remove their Cal.com bookings (hosted admin UI). If past
+  bookings existed, a Cal.com support deletion request is now **pending** — the
+  erasure is NOT complete until support confirms.
+- [ ] §1.3 — delete their contact-notification emails from the clinic mailbox
+  (applies once Epic 13's SMTP notifier is live; no-op before that).
+- [ ] §1.4 — record the action (who/when/counts — **never** the PII itself).
+- [ ] Reply to the requester. If everything above completed: done, plus the
+  backup-lag caveat from §3 (their rows persist in local backup archives up to
+  ~15 days, then rotate out). If a Cal.com support deletion is still pending:
+  report the request as **in progress**, and send the completion reply only
+  after support confirms (record the confirmation in the §1.4 log).
 
 ### 1.1 appdb: `contact_submissions`
 
@@ -58,7 +69,7 @@ SQL
 ```
 
 Idempotent: re-running the delete prints `DELETE 0`. A preview of `0` is a valid
-outcome (nothing stored, or already purged by retention §2) — still do §1.2/§1.3.
+outcome (nothing stored, or already purged by retention §2) — still do §1.2–§1.4.
 
 ### 1.2 Cal.com (hosted SaaS) — staff procedure
 
@@ -80,13 +91,33 @@ on app.cal.com:
    attendee's intake answers (owner name/email/phone, pet details) remain in
    Cal.com's store. For actual erasure of past-booking PII, file a deletion
    request with Cal.com support (support@cal.com; they are the processor —
-   GDPR/DPA-backed on paid plans). Record the ticket ID in the §1.3 log entry.
+   GDPR/DPA-backed on paid plans). Record the ticket ID in the §1.4 log entry,
+   **track it to confirmation, and record the confirmation** — until then the
+   erasure request stays open/in-progress (see the §1 checklist's reply step).
 4. **Google Calendar residue:** cancellation only cleans up events Cal.com
    created and still tracks. Spot-check the vet's Google Calendar for the
    attendee's past events — a copied/edited event, or one from before a
    reconnect, is clinic-owned and must be deleted by hand in Google Calendar.
 
-### 1.3 Log the action (never the PII)
+### 1.3 Clinic notification mailbox (applies once Epic 13 is live)
+
+From Epic 13 on, every accepted contact submission is also **emailed to the
+clinic mailbox** (name/email/message — lld-backend.md §6). Those copies are
+outside appdb, so neither §1.1 nor the §2 retention purge touches them:
+
+1. In the clinic mailbox, search for contact-form notification emails
+   containing the target address (search the To/body for `TARGET_EMAIL`).
+2. Delete each hit **and empty it from the mailbox trash** (a trashed email is
+   not erased). If the mailbox provider retains deleted mail server-side,
+   that retention window belongs in §5's promises — pin it down at Epic 13.
+3. Count the deletions for the §1.4 log entry.
+
+Before Epic 13 this is a **no-op**: the phase-1 `LoggingEmailNotifier` stub
+logs only the submission id (no PII). Revisit this section when Epic 13 picks
+its mail provider — and prefer keeping PII *out* of the notification body
+(send a submission id/reference instead), which would shrink this store away.
+
+### 1.4 Log the action (never the PII)
 
 Record — in the ops log (private GitHub issue comment thread on the erasure
 request, or the clinic's internal log), **not** in anything public and **never**
@@ -95,7 +126,8 @@ including the email/name/message content:
 ```
 2026-08-24 · erasure · operator: <who> · appdb rows deleted: <n> ·
 calcom bookings cancelled: <n> · calcom support ticket: <id or n/a> ·
-requester verified: yes
+calcom deletion confirmed: <date or PENDING> · mailbox copies deleted: <n or n/a> ·
+requester verified: yes · completion reply sent: <date or pending calcom>
 ```
 
 This mirrors the req §8.4 rule the purge job follows: log actions and counts,
@@ -144,7 +176,7 @@ The nightly `pgdump-nightly` CronJob (deployment.md §3.6) dumps appdb at
   granularity), then are gone. No off-site copies exist (§3.7) — local PVC only.
 - **Do not manually restore a dump** (§3.8) without re-running §1.1 for every
   erasure performed since that dump was taken — a restore silently resurrects
-  erased rows. Check the ops log (§1.3) after any restore.
+  erased rows. Check the ops log (§1.4) after any restore.
 - Cal.com hosted keeps its own backups on its own schedule — outside our
   control; their deletion timeline is governed by their DPA (§1.2 step 3).
 
@@ -160,8 +192,11 @@ verification of the CronJob itself: run the §2 smoke-test after merge.
 
 ## 5. What 17.9 (privacy policy) may promise — and no more
 
-- **Stores covered:** the contact-form inbox (`contact_submissions` in appdb) and
-  Cal.com hosted booking data. Nothing else holds personal data in phase 1.
+- **Stores covered:** the contact-form inbox (`contact_submissions` in appdb),
+  Cal.com hosted booking data, and — once Epic 13 ships SMTP notifications —
+  the clinic notification mailbox (§1.3; its provider-side retention must be
+  pinned down at Epic 13 before 17.9 promises anything about it). Nothing else
+  holds personal data in phase 1.
 - **Retention:** contact-form submissions are deleted automatically after
   **180 days** (pending 18.14 — keep policy text in sync with the CronJob's
   `RETENTION_DAYS`).

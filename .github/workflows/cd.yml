@@ -111,6 +111,7 @@ jobs:
           ssh $SSHO "$HOST" 'mkdir -p ~/allpets-deploy/api ~/allpets-deploy/ingress'
           scp $SSHO deploy/k8s/api/kustomization.yaml deploy/k8s/api/deployment.yaml \
                     deploy/k8s/api/service.yaml deploy/k8s/api/ingress.yaml \
+                    deploy/k8s/api/retention-purge-cronjob.yaml \
                     deploy/k8s/api/migrate-job.yaml "$HOST":~/allpets-deploy/api/
           scp $SSHO deploy/k8s/ingress/redirect-https.yaml "$HOST":~/allpets-deploy/ingress/
           ssh $SSHO "$HOST" "IMAGE='$IMAGE' GIT_SHA='$GIT_SHA' BUILD_TIME='$BUILD_TIME' bash -s" <<'REMOTE'
