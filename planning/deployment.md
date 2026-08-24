@@ -700,4 +700,188 @@ data.
   tier. The 4.1 **decision/rationale** lives in `planning/database-decision.md`
   (links back here); the build manifests live in `deploy/k8s/database/`. Do not fork
   a competing runbook file.
-## 4. CI/CD + rollback (Epic 15 / 15.8) — _TBD_
+## 4. CI/CD + rollback (Epic 15 / 15.8)
+
+> Documents the pipelines **as implemented and live** (backend PRs #209/#210,
+> frontend issue gimballock-1/allpets-frontend#52). If a workflow file and this
+> section disagree, the workflow file wins — fix this doc.
+
+### 4.1 The picture (both repos, one deploy plane)
+
+| | **allpets-backend** | **allpets-frontend** |
+|---|---|---|
+| Image | `ghcr.io/gimballock-1/allpets-api` | `ghcr.io/gimballock-1/allpets-frontend` |
+| Namespace / workload | `allpets-backend` / `deployment/allpets-api` | `allpets-frontend` / `deployment/allpets-site` |
+| Live host | `api-allpets.skpodduturi.dev` | `allpets.skpodduturi.dev` |
+| Health check | `GET /actuator/health` (status only) | `GET /api/health` (returns `gitSha` + `buildTime`) |
+| Deploy pins | immutable **`:<40-char sha>` tag** | immutable **`@sha256:` digest** |
+| Extra CD stage | **Flyway migration gate** before rollout | none (static site — no DB, no runtime secrets) |
+| Workflows | `.github/workflows/{ci,cd}.yml` | `.github/workflows/{ci,cd}.yml` |
+
+Shared plane (identical in both repos): GitHub Actions → build+push to GHCR with
+the job-scoped `GITHUB_TOKEN` → join the tailnet via `tailscale/github-action`
+(OAuth client, `tag:ci`) → SSH as `sk@100.108.60.90` with the host key **pinned**
+in `deploy/ci/known_hosts` (no TOFU; the same quasar key is committed in both
+repos — update both on rotation) → `kubectl` against the local k3s. All actions
+are SHA-pinned; checkout runs with `persist-credentials: false`; the deploy job
+refuses any ref except `main` (a `workflow_dispatch` from a branch is skipped).
+
+**A commit becomes a running pod:** open a PR → the required strict **`ci`**
+status check must pass (backend: `gradlew test`; frontend: typecheck → lint →
+production build → standalone-runtime smoke test → blocking axe-core WCAG A/AA
+scan) → squash-merge to `main` → `cd.yml` triggers on the merge commit if it
+touched a deploy-relevant path (see each workflow's `on.push.paths`) → the CD
+job re-runs the fast gates, builds/pushes the image, and deploys as below.
+Docs-only merges (e.g. this file) do **not** deploy.
+
+### 4.2 Backend CD flow (`allpets-api`), in order
+
+1. **Gate:** `./gradlew test` on the merge commit — a red test stops the deploy
+   before any image is pushed.
+2. **Build+push** `:main` (floating placeholder the committed manifest
+   references) and `:<sha>` (immutable, what gets deployed).
+3. **Tailscale → SSH preflights:** `allpets-api-secret` must exist in
+   `allpets-backend` (hard fail), `ghcr-pull` should exist (warn — see §4.4).
+4. **Capture the pre-deploy revision** (`deployment.kubernetes.io/revision`)
+   *before* touching anything — later steps create 2–3 new revisions, so the
+   rollback target must be this captured number, not "the previous one".
+5. **Migration gate (15.9):** render this build's `:<sha>` into
+   `migrate-job.yaml`, delete the prior `allpets-api-migrate` Job (Jobs are
+   immutable), apply, and **poll to completion (180s deadline) before the app
+   rolls**. A failed or timed-out migration aborts the deploy with the Job logs
+   — the app never runs against a half-migrated schema, and replicas never race
+   to migrate.
+6. **Pin + roll:** `sed` the `:<sha>` into `deployment.yaml`, `kubectl apply -k
+   ~/allpets-deploy/api`, then `set env GIT_SHA/BUILD_TIME` + `set image` —
+   the Deployment never rolls through the mutable `:main` (with
+   `IfNotPresent`, a node's stale cached `:main` could briefly run old code
+   against the just-migrated DB).
+7. **Verify or roll back (15.10):** `rollout status --timeout=180s`; on failure,
+   `rollout undo --to-revision=<captured>` + a 120s health confirm, and the run
+   exits 1 either way. **The migration is NOT reverted** — see §4.5b.
+
+### 4.3 Frontend CD flow (`allpets-site`) — the differences
+
+Same skeleton, minus DB stages, plus three deliberate divergences:
+
+- **Digest, not tag:** the deploy pins
+  `allpets-frontend@${{ steps.build.outputs.digest }}`. Rationale: re-running CD
+  on the *same commit* overwrites `:<sha>` with a **new** digest, but the image
+  *string* would be unchanged — no new ReplicaSet, and `IfNotPresent` would keep
+  serving the node's cached old digest. The digest is what that run actually
+  pushed, always. A guard verifies the `sed` pin landed (`grep -qF "$IMAGE"`)
+  and that the digest is non-empty.
+- **Whole-tree apply:** `deploy/k8s/` in the frontend repo is entirely
+  frontend-owned (ns, NetworkPolicies, ResourceQuota, Middleware, Ingress,
+  Service, Deployment), so the remote dir is recreated (`rm -rf` + `scp -r`)
+  and applied as one kustomization. The backend deliberately ships an
+  allowlist of files instead, because its tree sits next to shared substrate
+  (issuer, database) that a broad apply must never touch.
+- **Queue, don't cancel:** frontend `concurrency` uses
+  `cancel-in-progress: false` — cancelling mid-SSH could kill the session
+  between `apply` and the rollback block, stranding an unhealthy rollout.
+  ⚠️ The backend still has `cancel-in-progress: true` (pre-dates that review
+  finding) — known drift, tracked as an Epic 15 follow-up; don't copy it into
+  new pipelines.
+
+`GIT_SHA`/`BUILD_TIME` are baked at **build** time (Dockerfile ARG→ENV,
+surfaced by `/api/health`) instead of injected at deploy time like the backend.
+
+### 4.4 Secret flow (14.6 — current, honest state)
+
+**CD-side (GitHub repo secrets, per repo):** `TAILSCALE_OAUTH_CLIENT_ID`,
+`TAILSCALE_OAUTH_SECRET` (POC OAuth client, `tag:ci`), `DEV_SERVER_SSH_KEY`
+(dedicated per-repo deploy keys in `sk@quasar`'s `authorized_keys` —
+per-project-CD-key convention; frontend's is `allpets-frontend-cd`).
+
+**Cluster-side (runtime):** created **out-of-band** on quasar, NOT materialized
+by CD — `allpets-api-secret` (Spring datasource password) and `ghcr-pull`
+(dockerconfigjson, both app namespaces; referenced by both Deployments **and**
+the migrate Job). CD only preflights their existence. The idempotent
+`--dry-run=client | kubectl apply` materialization from repo secrets is **14.6,
+still open** — until it lands, creation/rotation is manual (rotate with the
+§3.9 pattern: update the secret, then `rollout restart` consumers).
+⚠️ `ghcr-pull` currently wraps an over-privileged classic PAT; rotation to a
+fine-grained `read:packages` token is a recorded follow-up (#136 closure note).
+
+### 4.5 Rollback runbook (operator, over SSH on quasar)
+
+All commands assume `export KUBECONFIG=/home/sk/.kube/config`.
+
+**First: find the last good version.**
+
+```bash
+# What is running / has run (image per revision):
+kubectl -n allpets-backend  rollout history deployment/allpets-api
+kubectl -n allpets-backend  rollout history deployment/allpets-api --revision=<N>   # shows the image
+kubectl -n allpets-frontend rollout history deployment/allpets-site --revision=<N>
+# Cross-check against reality: the merge history on main IS the tag history
+#   git log --oneline origin/main        (full sha = the backend image tag)
+# or the CD run list: gh run list -w CD -R gimballock-1/<repo>
+```
+
+**a) Image rollback — the immediate stopgap.**
+
+```bash
+# Backend — one revision back (or --to-revision=<N> from the history above):
+kubectl -n allpets-backend rollout undo deployment/allpets-api
+kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
+curl -fsS https://api-allpets.skpodduturi.dev/actuator/health          # expect "UP"
+kubectl -n allpets-backend get deploy allpets-api \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'; echo        # confirm the sha
+
+# Backend — pin an explicit known-good build instead:
+kubectl -n allpets-backend set image deployment/allpets-api \
+  allpets-api=ghcr.io/gimballock-1/allpets-api:<full-40-char-sha>
+
+# Frontend — same shape; verify via the health endpoint's gitSha:
+kubectl -n allpets-frontend rollout undo deployment/allpets-site
+kubectl -n allpets-frontend rollout status deployment/allpets-site --timeout=180s
+curl -fsS https://allpets.skpodduturi.dev/api/health                   # gitSha = the rolled-back commit
+# (to pin explicitly, use a digest from `rollout history --revision=<N>` —
+#  frontend deploys @sha256 digests, not :sha tags)
+```
+
+A `kubectl` rollback is a **stopgap**: the next merge to `main` redeploys HEAD
+and overwrites it. The durable rollback is `git revert` of the bad merge on
+`main` (through the normal PR + `ci` gate) so the pipeline itself ships the
+known-good code again.
+
+**b) Image rollback ≠ schema rollback.** Flyway migrations are **never
+auto-reverted** — not by the CD rollback path, not manually as a reflex. The
+schema contract is **expand/contract**: every migration must leave the DB in a
+state the *previous* app version still runs against (add columns nullable /
+with defaults; never drop or repurpose a column in the same release that stops
+writing it). So after an image rollback the old pods are expected to run
+against the *new* schema — that is by design, not a problem to "fix". If a
+migration itself is the thing that broke prod (bad data transform), that is an
+incident, not a rollback: restore the DB from §3.8 or write a *forward*
+repair migration; never `flyway undo`/hand-edit `flyway_schema_history`.
+
+**c) "The migration already ran."** The migrate Job completing and the rollout
+failing are **independent** — a failed deploy does *not* mean the migration
+didn't apply. Check, don't assume:
+
+```bash
+kubectl -n allpets-backend get job allpets-api-migrate            # succeeded: 1 ?
+kubectl -n allpets-backend logs job/allpets-api-migrate --tail=40
+```
+
+Re-running the gate is safe: Flyway is idempotent — already-applied versions
+are skipped (a re-run of the same commit's CD, or the next deploy, re-creates
+the Job as a no-op for applied versions). Likewise a *failed-rollout →
+rollback → fix-forward* sequence just runs the next migration set on top;
+`flyway_schema_history` in `appdb` is the source of truth for what applied.
+
+### 4.6 Known limits (accepted for the single-node POC)
+
+- Health/rollback cover the **Deployment only** — Ingress/Service/NetPol
+  changes apply declaratively and are verified by the post-deploy site check,
+  not rolled back automatically.
+- `kubectl apply` does not **prune**: an object removed from a kustomization
+  stays live until deleted manually as part of that removal.
+- The deploy plane uses `sk`'s cluster-admin kubeconfig; a namespace-scoped
+  deploy ServiceAccount is a recorded Epic 15 hardening follow-up, as is
+  splitting build-push into its own job to scope `packages:write`.
+- One node, one replica each: a deploy is a brief single-pod rollout, and
+  "rollback" never has a second healthy replica to fall back on mid-roll.
