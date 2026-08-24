@@ -1,5 +1,6 @@
 package com.allpets.api.common.web;
 
+import jakarta.validation.ConstraintViolationException;
 import java.util.Map;
 import java.util.TreeMap;
 import org.springframework.http.ResponseEntity;
@@ -21,6 +22,23 @@ public class ApiExceptionHandler {
         ex.getBindingResult().getFieldErrors().forEach(error ->
                 fieldErrors.putIfAbsent(error.getField(),
                         error.getDefaultMessage() == null ? "invalid" : error.getDefaultMessage()));
+
+        Map<String, Object> body = Map.of(
+                "status", "invalid",
+                "errors", fieldErrors);
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    /**
+     * Explicit (post-honeypot) validation in {@code ContactController} — same 400 shape as
+     * the {@code @Valid} path: field names + violation messages, never submitted values.
+     */
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<Map<String, Object>> handleConstraintViolations(ConstraintViolationException ex) {
+        Map<String, String> fieldErrors = new TreeMap<>();
+        ex.getConstraintViolations().forEach(violation ->
+                fieldErrors.putIfAbsent(violation.getPropertyPath().toString(),
+                        violation.getMessage() == null ? "invalid" : violation.getMessage()));
 
         Map<String, Object> body = Map.of(
                 "status", "invalid",
