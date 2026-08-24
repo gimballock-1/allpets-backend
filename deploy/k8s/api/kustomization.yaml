@@ -21,3 +21,6 @@ resources:
   - deployment.yaml
   - service.yaml
   - ingress.yaml
+  # 14.10 — nightly contact_submissions retention purge. A CronJob (mutable,
+  # unlike the migrate Job above) so it lives in the normal apply path.
+  - retention-purge-cronjob.yaml
