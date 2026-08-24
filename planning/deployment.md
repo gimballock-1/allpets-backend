@@ -747,10 +747,13 @@ Docs-only merges (e.g. this file) do **not** deploy.
    rollback target must be this captured number, not "the previous one".
 5. **Migration gate (15.9):** render this build's `:<sha>` into
    `migrate-job.yaml`, delete the prior `allpets-api-migrate` Job (Jobs are
-   immutable), apply, and **poll to completion (180s deadline) before the app
-   rolls**. A failed or timed-out migration aborts the deploy with the Job logs
-   — the app never runs against a half-migrated schema, and replicas never race
-   to migrate.
+   immutable), apply, and **poll to completion (180s deadline) before the new
+   image rolls**. A failed or timed-out migration aborts the deploy with the
+   Job logs — the new ReplicaSet is never created on a failed migration, and
+   replicas never race to migrate. The gate sequences the rollout; it does
+   **not** freeze traffic: the *old* pod keeps serving while (and after) the
+   Job changes the schema, which is exactly why every migration must stay
+   compatible with the currently-running app version (§4.5b expand/contract).
 6. **Pin + roll:** `sed` the `:<sha>` into `deployment.yaml`, `kubectl apply -k
    ~/allpets-deploy/api`, then `set env GIT_SHA/BUILD_TIME` + `set image` —
    the Deployment never rolls through the mutable `:main` (with
@@ -815,26 +818,41 @@ All commands assume `export KUBECONFIG=/home/sk/.kube/config`.
 kubectl -n allpets-backend  rollout history deployment/allpets-api
 kubectl -n allpets-backend  rollout history deployment/allpets-api --revision=<N>   # shows the image
 kubectl -n allpets-frontend rollout history deployment/allpets-site --revision=<N>
-# Cross-check against reality: the merge history on main IS the tag history
-#   git log --oneline origin/main        (full sha = the backend image tag)
-# or the CD run list: gh run list -w CD -R gimballock-1/<repo>
+# Cross-check against reality — ONLY commits with a SUCCESSFUL CD run have an
+# image (path-filtered merges — docs-only etc. — never build one, and a failed
+# run may not have pushed; picking such a sha ends in ImagePullBackOff):
+#   gh run list -w CD -R gimballock-1/<repo>   # successful runs = deployable shas
+# or browse the GHCR package's versions for the tags/digests that actually exist.
 ```
 
 **a) Image rollback — the immediate stopgap.**
 
 ```bash
-# Backend — one revision back (or --to-revision=<N> from the history above):
-kubectl -n allpets-backend rollout undo deployment/allpets-api
+# Backend — ALWAYS pass an explicit --to-revision. A normal backend deploy
+# creates intermediate revisions (`apply -k` resets to the :main placeholder,
+# then `set env` + `set image` re-pin), so a bare `rollout undo` commonly lands
+# on an intermediate revision that still runs the BAD image — the command
+# "succeeds" while rolling back nothing. Pick <N> from the history above:
+kubectl -n allpets-backend rollout undo deployment/allpets-api --to-revision=<N>
 kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
 curl -fsS https://api-allpets.skpodduturi.dev/actuator/health          # expect "UP"
 kubectl -n allpets-backend get deploy allpets-api \
   -o jsonpath='{.spec.template.spec.containers[0].image}'; echo        # confirm the sha
 
-# Backend — pin an explicit known-good build instead:
+# Backend — pin an explicit known-good build instead. `set image` starts a NEW
+# rollout, so re-verify AFTER it, and re-sync the version env in the same
+# breath (otherwise the actuator env keeps reporting the failed deploy's
+# GIT_SHA/BUILD_TIME):
 kubectl -n allpets-backend set image deployment/allpets-api \
   allpets-api=ghcr.io/gimballock-1/allpets-api:<full-40-char-sha>
+kubectl -n allpets-backend set env deployment/allpets-api \
+  GIT_SHA=<same-sha> BUILD_TIME=<from-that-CD-run>
+kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
+curl -fsS https://api-allpets.skpodduturi.dev/actuator/health   # expect "UP"
 
-# Frontend — same shape; verify via the health endpoint's gitSha:
+# Frontend — same shape; verify via the health endpoint's gitSha. (Frontend
+# deploys are single-revision — one pre-pinned apply, no set image/env — so a
+# bare `rollout undo` IS safe here, unlike the backend above.)
 kubectl -n allpets-frontend rollout undo deployment/allpets-site
 kubectl -n allpets-frontend rollout status deployment/allpets-site --timeout=180s
 curl -fsS https://allpets.skpodduturi.dev/api/health                   # gitSha = the rolled-back commit
@@ -855,8 +873,15 @@ with defaults; never drop or repurpose a column in the same release that stops
 writing it). So after an image rollback the old pods are expected to run
 against the *new* schema — that is by design, not a problem to "fix". If a
 migration itself is the thing that broke prod (bad data transform), that is an
-incident, not a rollback: restore the DB from §3.8 or write a *forward*
-repair migration; never `flyway undo`/hand-edit `flyway_schema_history`.
+incident, not a rollback: write a *forward* repair migration, or restore the
+DB — but **do not follow §3.8 verbatim for `appdb`**: §3.8 was written for
+`payload`/`calcom` (it derives the owner as `<db>_app` and scales
+`deploy/payload`). The live `appdb` contract is owner **`app_svc`**, consumer
+**`deploy/allpets-api`**. Adapted sequence: scale `allpets-api` to 0 → restore
+database `appdb` as the superuser (`--clean --create`, per §3.8 mechanics) →
+reassign ownership to `app_svc` (or re-run the idempotent `postgres-init` Job,
+which re-asserts the full posture) → scale the API back up. Never
+`flyway undo`/hand-edit `flyway_schema_history`.
 
 **c) "The migration already ran."** The migrate Job completing and the rollout
 failing are **independent** — a failed deploy does *not* mean the migration
@@ -876,8 +901,12 @@ rollback → fix-forward* sequence just runs the next migration set on top;
 ### 4.6 Known limits (accepted for the single-node POC)
 
 - Health/rollback cover the **Deployment only** — Ingress/Service/NetPol
-  changes apply declaratively and are verified by the post-deploy site check,
-  not rolled back automatically.
+  changes apply declaratively, are never rolled back automatically, and are
+  **not verified by CD at all**: neither workflow makes an external HTTP
+  request after deploying (`rollout status` proves pod health, not public
+  routing). After merging a change to these resources, verify the public host
+  manually (`curl -fsS https://<host>/`); an external smoke check in CD is an
+  open follow-up.
 - `kubectl apply` does not **prune**: an object removed from a kustomization
   stays live until deleted manually as part of that removal.
 - The deploy plane uses `sk`'s cluster-admin kubeconfig; a namespace-scoped
