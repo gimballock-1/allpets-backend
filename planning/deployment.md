@@ -727,7 +727,7 @@ are SHA-pinned; checkout runs with `persist-credentials: false`; the deploy job
 refuses any ref except `main` (a `workflow_dispatch` from a branch is skipped).
 
 **A commit becomes a running pod:** open a PR → the required strict **`ci`**
-status check must pass (backend: `gradlew test`; frontend: typecheck → lint →
+status check must pass (backend: `gradlew build` — compile + test + assemble; frontend: typecheck → lint →
 production build → standalone-runtime smoke test → blocking axe-core WCAG A/AA
 scan) → squash-merge to `main` → `cd.yml` triggers on the merge commit if it
 touched a deploy-relevant path (see each workflow's `on.push.paths`) → the CD
@@ -829,9 +829,9 @@ kubectl -n allpets-frontend rollout history deployment/allpets-site --revision=<
 
 ```bash
 # Backend — ALWAYS pass an explicit --to-revision. A normal backend deploy
-# creates intermediate revisions (`apply -k` resets to the :main placeholder,
-# then `set env` + `set image` re-pin), so a bare `rollout undo` commonly lands
-# on an intermediate revision that still runs the BAD image — the command
+# creates intermediate revisions (`apply -k` rolls the new sha-pinned image,
+# then `set env` adds another revision), so "one revision back" from HEAD is
+# usually just the same BAD image with stale env — a bare `rollout undo`
 # "succeeds" while rolling back nothing. Pick <N> from the history above:
 kubectl -n allpets-backend rollout undo deployment/allpets-api --to-revision=<N>
 kubectl -n allpets-backend rollout status deployment/allpets-api --timeout=180s
